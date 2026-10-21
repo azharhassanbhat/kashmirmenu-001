@@ -1,0 +1,33 @@
+# Production overrides. Use with:
+#   --config.file=/etc/prometheus/prometheus.prod.yml
+#
+# Differences from the local file, and why:
+#   - A longer scrape interval (30s): on a single small instance the extra resolution is rarely worth
+#     the series volume, and alert windows here are minutes, not seconds.
+#   - An explicit environment label, so a federated or remote-write setup can separate deployments.
+#   - No self-scrape of a development Prometheus.
+#
+# This file deliberately does NOT enable the remote-write receiver. k6 load tests do not belong in
+# production (see PERFORMANCE_TESTING_GUIDE.md), so production has no reason to accept writes.
+
+
+global:
+  scrape_interval: 30s
+  scrape_timeout: 20s
+  evaluation_interval: 60s
+
+  external_labels:
+    environment: production
+    cluster: kashmirmenu
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  - job_name: kashmirmenu
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['app:9091']
+        labels:
+          service: backend
+          component: api

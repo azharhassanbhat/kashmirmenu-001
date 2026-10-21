@@ -1,0 +1,38 @@
+# A throwaway MySQL for the integration tests that need the real thing:
+#
+#   docker compose -f docker-compose.test.yml up -d --wait
+#   ./gradlew mysqlTest            (Windows PowerShell: .\gradlew mysqlTest)
+#   docker compose -f docker-compose.test.yml down -v
+#
+# Separate from docker-compose.yml on purpose: different port, different credentials, data kept in memory
+# and discarded on `down`, so it can never touch a real database. Start it fresh for each run; the tests
+# create their own restaurants, but some assume a database nothing else has been written to.
+#
+# Isolation is deliberately left at MySQL's default (REPEATABLE READ), because that is what production
+# runs and what the locking code has to be correct under. Do not set it to READ-COMMITTED here.
+services:
+  mysql-test:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: kashmir_menu_test
+      MYSQL_USER: kashmirmenu_test
+      MYSQL_PASSWORD: kashmirmenu_test_pw
+      MYSQL_ROOT_PASSWORD: root_test_pw
+      TZ: UTC
+    ports:
+      - "127.0.0.1:3308:3306"
+    tmpfs:
+      - /var/lib/mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      # A lock that cannot be had fails in seconds, so a hang shows up as a failed test, not a long wait.
+      - --innodb-lock-wait-timeout=15
+      # The suite keeps one Spring context (and one pool of 10 connections) per distinct test configuration, and
+      # dozens are alive at once; the default of 151 connections ran out and failed whichever context loaded last.
+      - --max-connections=1000
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_test_pw"]
+      interval: 5s
+      timeout: 5s
+      retries: 20

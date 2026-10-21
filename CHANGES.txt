@@ -1,0 +1,1567 @@
+KASHMIRMENU - CHANGE LOG
+========================
+Covers all work done in this session, in two phases:
+  Phase 1 - Production readiness of the existing Spring Boot backend
+  Phase 2 - New React frontend, plus the backend changes it required
+
+This log was compiled from the session's edit history and file timestamps (the
+project is not a git repository, so there is no diff to check against). Items
+marked [NOT VERIFIED] were not exercised in this environment.
+
+
+--------------------------------------------------------------------------------
+PHASE 1 - PRODUCTION READINESS (BACKEND)
+--------------------------------------------------------------------------------
+
+1. Security hardening
+   - JWT secret validation: JwtProperties now fails fast at startup if the secret
+     is missing or shorter than 32 bytes (no insecure fallback).
+   - JwtAuthenticationFilter: handles invalid/expired tokens (JwtException) with
+     logging instead of letting them surface as server errors.
+   - GlobalExceptionHandler: added handlers for BadCredentialsException and
+     authentication errors. Login failures return 401 with a generic message
+     ("Invalid email or password.") so the response does not reveal whether an
+     account exists.
+   - CORS: new CorsProperties + CorsConfig. Allowed origins come from
+     CORS_ALLOWED_ORIGINS. Fails closed (no origins) if unset in prod.
+   - WebSocketConfig: STOMP endpoint /ws now uses the configured allowed origins
+     instead of a wildcard.
+   - Rate limiting: new RateLimitProperties and AuthRateLimitFilter, a per-IP
+     limiter on /api/v1/auth/**. X-Forwarded-For is only trusted when
+     TRUST_FORWARDED_HEADER=true.
+   - SecurityConfig: rewritten with stateless sessions, explicit public routes,
+     JSON 401/403 responses, and the rate-limit filter in the chain.
+   - Role seeding: new migration V16__seed_missing_roles.sql. The RoleName enum
+     had roles that no migration inserted, so registering an owner failed on a
+     fresh database.
+   - User.restaurant made nullable (and CustomUserDetails.getRestaurantId made
+     null-safe) so ADMIN/CUSTOMER users without a restaurant work.
+
+2. Operational readiness
+   - Spring profiles: application.yaml (shared), application-dev.yml,
+     application-prod.yml, application-test.yml. No environment-specific values
+     are hardcoded; everything is driven by environment variables.
+   - Production profile: Swagger UI and /v3/api-docs disabled; JWT_SECRET and
+     CORS_ALLOWED_ORIGINS have no defaults, so the app refuses to start without
+     them.
+   - Actuator added (build.gradle). Liveness/readiness health endpoints are
+     public; other endpoints are not exposed.
+   - RequestIdFilter + WebFilterConfig: every request gets an X-Request-Id
+     (generated if absent), echoed on the response and put in log lines.
+   - Graceful shutdown enabled.
+
+3. Test coverage (H2 in-memory database, "test" profile)
+   - build.gradle: added H2 as a test runtime dependency.
+   - application-test.yml, src/test/resources/data.sql (seeds roles).
+   - KashmirmenuApplicationTests (context loads)
+   - AuthControllerIT (4 tests)
+   - SecurityAccessIT (4 tests)
+   - JwtServiceTest (3 tests)
+
+4. Containerization and CI/CD
+   - Dockerfile and .dockerignore for the backend image.
+   - docker-compose.yml: MySQL + app. Required secrets (DB_PASSWORD,
+     DB_ROOT_PASSWORD, JWT_SECRET) fail with a clear message if unset.
+   - .env.example documenting every variable.
+   - .gitignore: ignores .env files (keeps .env.example).
+   - .github/workflows/ci.yml: build + test on push/PR to main, upload test
+     reports, then build the Docker image (no push).
+   - README.md: configuration table, operability notes, testing, CI/CD.
+
+
+--------------------------------------------------------------------------------
+PHASE 2 - FRONTEND, AND BACKEND CHANGES IT NEEDED
+--------------------------------------------------------------------------------
+
+A. Backend changes made to support the frontend
+   (All were needed because the existing API had no way for an unauthenticated
+   diner to use a QR code, and some staff endpoints had tenant/role gaps.)
+
+   New public API for the QR flow  (controller/PublicController.java,
+   service/PublicOrderingService.java)
+   - GET  /api/public/tables/{qr}                    table + restaurant branding
+                                                      + enabled payment methods
+   - GET  /api/public/tables/{qr}/menu               menu grouped by category
+   - GET/POST/PUT/DELETE .../cart, .../cart/items    per-table shared cart
+   - POST /api/public/tables/{qr}/orders             place order from the cart
+   - GET  /api/public/orders/{orderNumber}           order tracking
+   - POST /api/public/orders/{orderNumber}/payments  record a PENDING payment
+   Security model: the table's random qrIdentifier (UUID) is the only credential.
+   New DTOs: PublicTableResponse, PublicMenuCategoryResponse, PublicCartItemRequest,
+   PublicQuantityRequest, PublicOrderRequest. New repository queries in
+   CategoryRepository, MenuItemRepository, RestaurantTableRepository (including a
+   fetch-join to avoid a lazy-loading error).
+   SecurityConfig permits /api/public/**; AuthRateLimitFilter adds a per-IP bucket
+   for public writes (PUBLIC_RATE_LIMIT, default 120 per 60s window).
+
+   New: GET /api/v1/me (MeController, MeResponse) - id, name, email, role,
+   restaurantId, so the frontend can route by role.
+
+   Tenant isolation and role guards on existing endpoints
+   - KitchenController / KitchenService / KitchenServiceImpl: orders are now
+     scoped to the caller's restaurant and restricted to kitchen/management roles.
+     Added GET /api/v1/kitchen/orders/active. The state-transition rules were
+     already server-side.
+   - PaymentController / PaymentService / PaymentServiceImpl: staff-only with
+     restaurant checks (previously any authenticated user could read or change any
+     restaurant's payments). Added createPaymentByOrderNumber for the public flow.
+   - KitchenOrderResponse now includes the order's items; KitchenMapper uses
+     OrderMapper.
+
+   Other backend fixes
+   - OrderServiceImpl: order numbers are now random (previously guessable), which
+     matters because order tracking is public by order number.
+   - OrderTrackingServiceImpl: no longer returns 404 when an order has no payment
+     yet; payment status is optional.
+   - RestaurantTableServiceImpl: the QR code URL comes from configuration
+     (PUBLIC_BASE_URL) instead of a hardcoded host; QR now encodes
+     {PUBLIC_BASE_URL}/menu/{qrIdentifier}.
+   - application.yaml / application-prod.yml: added public-base-url
+     (required in prod), public-limit.
+   - New integration test PublicOrderingFlowIT covering the full QR flow and the
+     kitchen items.
+   Backend test total after Phase 2: 15 tests, all passing (re-confirmed at the
+   end of the session).
+
+B. New frontend  (/frontend - React 19, Vite 7, TypeScript, React Router,
+   TanStack Query, STOMP over SockJS)
+   Project setup
+   - package.json, package-lock.json, vite.config.ts (dev proxy for /api and /ws,
+     so no CORS needed in development), tsconfig.json, index.html, .env.example,
+     .gitignore, .dockerignore.
+   - package-lock.json originally pointed at Gap's internal Artifactory host; it
+     was rewritten to registry.npmjs.org URLs (integrity hashes unchanged) so that
+     GitHub CI and Docker builds can install. Confirm this matches your registry
+     policy.
+   - Dependencies audited: 0 known vulnerabilities at time of install.
+
+   Source layout (frontend/src)
+   - api/types.ts, api/client.ts, api/index.ts: typed API layer. The client
+     unwraps the backend's two response styles (ApiResponse envelope vs raw DTO),
+     sends the bearer token only on non-public routes, turns errors into ApiError
+     with field errors, and logs the user out on an expired session.
+   - auth/AuthContext.tsx, auth/RequireRole.tsx: token + /me session, role-based
+     routing and guard.
+   - lib/format.ts (currency, time helpers), lib/useRestaurantTopic.ts (websocket
+     subscription with auto-reconnect; pages also poll as a fallback).
+   - components/ui.tsx: spinner, error display, status badge, modal, form field.
+   - styles.css: mobile-first, light/dark, restaurant brand color on the menu.
+   - main.tsx, App.tsx: providers and routes.
+
+   Screens
+   - Diners (no login): /menu/:qr  - menu, search, veg filter, shared table cart,
+     notes, place order.  /order/:orderNumber  - live status (polls every 5s),
+     payment method choice with wording that staff confirm the payment.
+   - Staff auth: /login, /register (registers a restaurant + owner).
+   - Admin (/admin): dashboard + notifications, orders (mark payment paid/failed,
+     cancel), menu items, categories, tables with QR view/download/print,
+     inventory, coupons, payment settings.
+   - Kitchen (/kitchen): live board (New / Confirmed / Preparing / Ready) with
+     next-step and cancel actions.
+
+   Frontend tests (vitest): 9 passing - API client behavior (envelope unwrapping,
+   token handling, 401 handling, network errors) and formatting helpers.
+   Type check and production build both pass.
+
+C. Frontend infrastructure and docs
+   - frontend/Dockerfile (node build -> nginx) and frontend/nginx.conf (static
+     files, SPA fallback, /api and /ws proxy, security headers).
+   - docker-compose.yml: added the frontend service (port 3000); backend port is
+     now bound to 127.0.0.1 only; added PUBLIC_BASE_URL, PUBLIC_RATE_LIMIT and
+     TRUST_FORWARDED_HEADER (defaults to true in compose because the bundled
+     nginx overwrites X-Forwarded-For - without this all diners would share one
+     rate-limit bucket).
+   - .env.example: PUBLIC_BASE_URL, FRONTEND_PORT, PUBLIC_RATE_LIMIT.
+   - .github/workflows/ci.yml: new "frontend" job (install, typecheck, test, build,
+     npm audit); docker-build now builds both images.
+   - README.md: frontend section (routes, how the QR flow works, dev commands),
+     new config variables, expanded Known limitations.
+
+D. Packaging
+   - kashmirmenu-full-stack.zip created in the parent folder (excludes
+     node_modules, build output, IDE folders, logs and any real .env).
+
+
+--------------------------------------------------------------------------------
+KNOWN GAPS AND THINGS NOT VERIFIED
+--------------------------------------------------------------------------------
+ 1. Coupons are stored/managed but NOT applied to cart or order totals (the
+    existing apply endpoint only increments a counter). The admin page says so;
+    the diner UI deliberately has no coupon box.
+ 2. The websocket (/topic/restaurants/{id}) is unauthenticated: anyone who knows a
+    restaurant id can subscribe to its notification messages.
+ 3. Coupon, notification and inventory endpoints have no role guards, and coupons
+    and notifications accept restaurantId from the client (possible cross-tenant
+    access). A full authorization audit has NOT been done.
+ 4. No payment gateway. A diner's payment choice creates a PENDING payment; staff
+    mark it paid/failed manually.
+ 5. No staff-creation endpoint, so chef/waiter/manager accounts cannot be created
+    through the API.
+ 6. Anyone holding a table's QR code can order for that table, and the cart is
+    shared by everyone at the table. Deactivating/deleting the table revokes it.
+ 7. The rate limiter is in-memory and per instance.
+ 8. [NOT VERIFIED] The frontend has not been run end to end against a live backend
+    or in a browser. A live test was attempted but could not run (H2 is a
+    test-only dependency and the dev profile needs MySQL). Endpoint paths and
+    response shapes were checked against the controllers by reading them.
+ 9. [NOT VERIFIED] Neither Docker image has been built here, and docker-compose
+    has not been started. The new CI workflow has not run.
+10. [NOT VERIFIED] The earlier "production ready" backend work was verified through
+    the automated tests only, not by deploying it.
+11. Flyway migrations were validated only indirectly (tests use H2 with Hibernate
+    schema generation and Flyway disabled). Run the app once against a real
+    MySQL to confirm V16 and the schema validate cleanly.
+
+Files in the folder that were NOT changed by this work: .idea/* and
+.claude/settings.local.json were touched by the IDE / tooling.
+
+==========================================================================
+Diner screens redesign ("Chinar" theme) — 2026-10-13
+==========================================================================
+Scope: customer QR menu, checkout and order tracking only. Backend, database,
+API client, admin, kitchen and auth screens are unchanged.
+
+New route: /menu/:qr/cart (full-screen "Your Order" checkout; replaces the cart
+modal). All existing routes and API calls are kept, with the same query keys.
+
+Added
+  frontend/src/customer.css                 theme, scoped under .km
+  frontend/src/assets/fonts/*               Lora + Poppins Latin subsets (WOFF, SIL OFL,
+                                            self-hosted because the CSP is font-src 'self')
+  frontend/src/components/customer/*        Chinar leaf, Dal Lake scene, header, hero,
+                                            category rail, dish card, stepper, cart bar,
+                                            bottom nav, sheets
+  frontend/src/pages/customer/CheckoutPage.tsx
+  frontend/src/pages/customer/useTableOrdering.ts   shared queries/mutations
+  frontend/src/lib/orderHistory.ts          orders placed on this device (still reads
+                                            the old kmenu.lastOrder.* key)
+Changed
+  App.tsx (one route), MenuPage.tsx, OrderPage.tsx, lib/format.ts (+ price()),
+  lib/format.test.ts
+
+Deliberate gaps (backend does not support them yet)
+  - Promo codes: the only apply endpoint is staff-authenticated and does not
+    change cart totals, so there is no promo field.
+  - Bestseller / chef's special badges: no field on MenuItem.
+  - Offers tab: no offers feature; the bottom nav has Search instead.
+  - Taxes and discount are shown exactly as the cart returns them (currently 0).
+  - Restaurant primaryColor is no longer applied on diner screens (the seed
+    value is green, which conflicts with the theme).
+  - The hero is an illustrated vector scene; pass a licensed photo via
+    <Hero imageSrc> to replace it.
+  - Prep time estimate = longest preparationTime among the dishes in the cart.
+
+Verification
+  - Rendered and clicked through in headless Chromium against a mock of the
+    public API (menu, filter, search, add, quantity, checkout, place order,
+    confirmation, sheets, empty and invalid-QR states) at 390px, 820px and 1280px.
+    No runtime errors, no horizontal overflow. Screenshots: docs/screenshots/chinar-*.png
+  - [NOT VERIFIED] npm ci / tsc / vite build / vitest / Docker / Lighthouse:
+    the npm registry was unreachable, so the real toolchain was not run. The
+    preview used esbuild (no type checking) with stand-in router/query shims.
+
+==========================================================================
+Staff screens theme + Google reviews — 2026-10-13
+==========================================================================
+Staff screens (admin, kitchen, sign in, register, landing)
+  - Chinar palette and fonts via a token layer appended to styles.css (the
+    original 1,891 lines are byte-identical). Fonts moved to src/fonts.css.
+  - Chinar leaf brand mark; Dal Lake scene on the sign-in panel.
+
+Google reviews (customers review on Google with their own account; apps cannot
+post reviews for them)
+  - DB: V17 adds nullable restaurants.google_place_id.
+  - PUT /api/restaurants/{id}/google-reviews (ADMIN, RESTAURANT_OWNER; ownership checked).
+  - GET /api/public/tables/{qr} now also returns googleReviewUrl and googleMapsUrl.
+  - GET /api/public/tables/{qr}/reviews: rating + recent reviews when
+    GOOGLE_PLACES_API_KEY is set (Places API (New), cached 10 min); otherwise links only.
+  - Without an API key the "Google reviews" pill and "read reviews" link open the
+    restaurant's reviews on Google Maps. With a key they open the in-app reviews sheet.
+  - Diners see the review option without opening any menu:
+      * "Write a review" button in the menu hero, above the fold on phones
+      * a review card at the end of the menu
+      * on the order page, a review card near the top once food is READY/SERVED
+        (lower down before that), plus "Review us on Google" in the More sheet.
+    Everyone is asked; there is no review gating and no incentive.
+  - Dashboard shows owners a reminder until a Google Place ID is set (nothing
+    review-related appears for diners before that).
+  - Admin: Admin > Google reviews page (Place ID, copy/test link, live status).
+
+Fix: the app's own AccessDeniedException (ownership checks) was not handled and
+returned 500; it now returns 403.
+
+Verification
+  - Full App.tsx rendered in headless Chromium (stand-in router/query shims, mocked
+    API): staff pages at 1280px, diner reviews flows at 390px in both key / no-key
+    modes. No runtime errors.
+  - Java: syntax-checked with the JDK compiler API only. Spring/Lombok jars could not
+    be downloaded, so the code was NOT compiled and tests were NOT run.
+  - [NOT VERIFIED] npm typecheck/build/test, ./gradlew test, Docker, live Google calls.
+
+
+--------------------------------------------------------------------------------
+PHASE 3 - PAYMENTS & REVENUE ANALYTICS
+--------------------------------------------------------------------------------
+
+Goal: separate tracking of Cash / UPI / Card / Wallet, with UPI and wallet broken
+down by app (Google Pay, PhonePe, Paytm UPI, Paytm Wallet, ...), plus a premium
+analytics page, payment history and daily reconciliation.
+
+The existing payment model could not express any of this: payments.order_id was
+UNIQUE (one payment per order, so no split bills), there was no provider, no refund
+record, no payment timestamp of its own, and no business time zone. Phase 3 is
+mostly about fixing that foundation; the dashboard then follows from it.
+
+
+1. Data model (migration V18__payment_split_refunds_reconciliation.sql)
+   - payments: dropped the UNIQUE on order_id (kept a plain index for the FK), so an
+     order can have several payments - split bills, and retries after a failure.
+   - payments: added restaurant_id (denormalised for indexed per-restaurant
+     aggregation), payment_provider, card_type, currency, payment_timestamp,
+     idempotency_key, recorded_by_user_id, settled_at. Indexes on
+     (restaurant_id, payment_timestamp) and (restaurant_id, payment_status,
+     payment_timestamp); unique (restaurant_id, idempotency_key).
+   - New table payment_refunds: many partial refunds per payment, each linked to the
+     original payment, with amount, reason, date and who issued it.
+   - New table cash_reconciliations: per-day cash counts (expected, counted,
+     difference, note, who counted).
+   - Backfill is non-destructive: restaurant_id from the order, payment_timestamp
+     from paid_at/created_at. No provider is invented - historical rows keep NULL and
+     are reported as "Unknown". Every pre-existing REFUNDED payment gets one full
+     refund record so net collections stay correct (dated by updated_at, the only
+     information available - see README known limitations).
+
+2. Enums
+   - PaymentMethod: added BANK_TRANSFER, GIFT_CARD, STORE_CREDIT, VOUCHER, OTHER, and
+     metadata (label, cash?, digital?, diner-selectable?, has providers?). Adding a
+     method is now a one-line change that flows through to the API and dashboard.
+   - New PaymentProvider (parent method + label) and CardType (kind only, never a
+     card number).
+   - PaymentStatus: added CANCELLED and PARTIALLY_REFUNDED, plus a CAPTURED set that
+     defines, in one place, what counts as money received.
+
+3. Payment rules (PaymentServiceImpl, rewritten)
+   - Staff can record money received as 1..10 components in one request (split bill).
+   - The order row is locked while payments change, so two staff members or a double
+     click cannot overpay an order; an optional idempotency key makes a replayed
+     request return the original result instead of recording twice.
+   - Amounts are validated against what is actually outstanding.
+   - A payment can only move out of PENDING, and repeating the same status change is a
+     no-op (duplicate gateway callbacks are safe).
+   - Refunds go through their own endpoint, are bounded by what is left on the payment,
+     and set PARTIALLY_REFUNDED / REFUNDED automatically.
+   - A provider must belong to its method (Paytm UPI is not a wallet); card type only
+     applies to CARD. Nothing is ever inferred.
+   - Taking payment at the counter cancels the diner's pending choice (kept on record,
+     never counted as revenue).
+   - SECURITY: the diner endpoint and the staff endpoint no longer share a request
+     type. CreatePaymentRequest (public) still carries only a method; amounts,
+     providers and "already paid" exist solely on the staff type. Counter-only methods
+     are not offered to diners.
+
+4. Analytics (new com.kashmirmenu.app.analytics package + PaymentAnalyticsQueries)
+   - All aggregation is database-side: grouped rows by method/provider/hour, never a
+     download of individual payments. JPQL is assembled from fixed fragments with
+     named parameters only.
+   - One pure calculator derives every panel from the same rows, so providers reconcile
+     to their method, methods to the total, and the series and heatmap to both.
+   - Period presets compare against the same elapsed slice of the previous period, so
+     "today so far" is not compared with a whole yesterday.
+   - Insight rules each state a minimum sample size and stay silent below it.
+   - Half-open [start, end) date ranges and a configurable business time zone.
+
+5. API
+   - GET  /api/v1/payment-analytics/meta|overview|transactions|transactions/{id}
+   - GET  /api/v1/payment-analytics/transactions/export        (CSV, 50k row cap)
+   - GET  /api/v1/payment-analytics/reconciliation
+   - POST /api/v1/payment-analytics/reconciliation/counts|settle
+     All of the above: ADMIN / RESTAURANT_OWNER / MANAGER only.
+   - POST /api/v1/payments/orders/{id}/collect        (cashiers and waiters too)
+   - GET  /api/v1/payments/orders/{id}/summary
+   - POST /api/v1/payments/{id}/refunds               (managers and owners only)
+   - Order tracking now returns amountPaid and balanceDue, derived from all payments.
+   - Dashboard "today's revenue" now uses the same definition as the new page
+     (received minus refunds issued), instead of summing payment rows directly.
+   - CSV cells starting with = + - @ are prefixed with an apostrophe (formula
+     injection); only whitelisted columns can be sorted on.
+
+6. Frontend
+   - New page /admin/revenue: hero total with the method split, six KPI cards with
+     previous-period comparison, insights, six charts (method donut, provider bars,
+     revenue over time, payments over time, period comparison, weekday/hour heatmap),
+     filters (period incl. custom range, method, provider, status, staff, grouping),
+     payment history (search, sort, pagination, CSV, detail drawer with refunds), and
+     the daily reconciliation panel.
+   - Charts are hand-written SVG. No chart library was added: this bundle is also
+     served to diners scanning a QR code.
+   - Orders page: "Take payment" opens a split-capable dialog; confirming a diner's
+     pending payment now asks which UPI app or card type it was. This is the change
+     that makes the analytics accurate - the app is captured at billing time.
+   - Diner order page: shows part-paid balances and allows a retry after a failure.
+   - styles.css: payment-method palette (green/violet/blue/gold, clear of the crimson
+     primary, each always paired with a text label), tuned for the always-dark Chinar
+     staff theme; the history table becomes amount-led transaction cards on phones.
+   - New lib/charts.ts holds all chart geometry and formatting as pure functions.
+
+7. Configuration
+   - APP_TIMEZONE (default Asia/Kolkata) applied to both the app and the MySQL
+     container, so stored timestamps and reporting agree. APP_CURRENCY (default INR).
+   - Both documented in .env.example and the README.
+
+Verification
+  - Pure Java logic (period resolution, bucketing, the KPI calculator, insight rules,
+    order balances, money formatting): 46 JUnit tests written and RUN here via the JDK
+    compiler API, all passing. Mutation-checked - deliberately breaking the net-of-
+    refunds maths, the unknown-provider bucket and the comparison window each made the
+    expected tests fail.
+  - Frontend chart/format helpers: 24 Vitest tests written and RUN via a local shim.
+    Two real bugs found and fixed (donut percentages rounded to 2dp instead of 1; the
+    axis maximum was too coarse, e.g. 6000 for a 4,973 peak).
+  - Layout: the real styles.css was rendered in headless Chromium with the real chart
+    geometry at 320 / 390 / 768 / 1440px. No horizontal page overflow, no tap target
+    under 32px. Found and fixed: the palette had been keyed to prefers-color-scheme,
+    but the staff console runs an unconditional dark theme, so the method colours were
+    wrong on every device.
+  - [NOT VERIFIED] ./gradlew test - Spring, JPA and Lombok jars cannot be downloaded in
+    this environment, so NOTHING in the Spring layer was compiled: the JPQL in
+    PaymentAnalyticsQueries, the services, the controllers and PaymentAnalyticsIT have
+    never been run. Note that ddl-auto=validate means any entity/migration mismatch
+    will stop startup.
+  - [NOT VERIFIED] V18 against a real MySQL database, and the data backfill.
+  - [NOT VERIFIED] npm typecheck / build / test - @types/react is unavailable here, so
+    the new .tsx files were only parsed, not type-checked.
+  - [NOT VERIFIED] the app running end to end, on real devices, or via Docker/nginx.
+
+
+--------------------------------------------------------------------------------
+PHASE 4 - COUPONS DINERS CAN ACTUALLY USE
+--------------------------------------------------------------------------------
+
+Reported: "the coupons section is not visible for customer". It was not merely hidden -
+coupons could be created in the admin console but could never reach a bill. Four
+separate things were broken:
+
+  1. No public endpoint. /api/v1/coupons/** requires authentication, so a diner on the
+     QR flow had no way to send a code.
+  2. Cart totals hardcoded the discount to zero ("Tax and discount will be dynamic in
+     future versions"), and recalculateTotals runs on every cart change, so even a
+     discount set by hand would have been wiped on the next tap.
+  3. Nothing linked a coupon to a cart or an order, so there was nowhere for a discount
+     to live, and no record of which code had been used.
+  4. CouponServiceImpl.applyCoupon incremented used_count as a side effect of merely
+     CHECKING a code. A diner tapping "apply" twice burned two uses of a limited run,
+     and the discount was still never stored anywhere.
+
+Also fixed while here (pre-existing, noted in the README's limitations):
+  5. CouponController had no role guard and trusted the client's restaurantId, so any
+     authenticated user - including a CUSTOMER account - could list, create, edit and
+     delete any restaurant's coupons.
+  6. The percentage discount called BigDecimal.divide() with no scale or rounding, which
+     throws ArithmeticException on a non-terminating result.
+  7. A fixed-amount coupon larger than the basket produced a negative total.
+
+Changes
+
+  Schema (V19__link_coupons_to_carts_and_orders.sql)
+    - carts.coupon_id (FK, ON DELETE SET NULL): the coupon the table is holding.
+    - orders.coupon_id + orders.coupon_code: the reference plus the code as a plain
+      value, so a past order stays readable if the coupon is later deleted.
+    - CHECK (used_count >= 0) on coupons.
+
+  Pure logic (new com.kashmirmenu.app.coupon package)
+    - CouponPricing: validity and discount arithmetic with no side effects, used by the
+      diner's preview, every cart recalculation and order placement, so all three agree.
+      Explicit scale and HALF_UP rounding; discount is clamped to the basket.
+    - CouponState: one value per refusal, each with the message a diner sees.
+
+  Behaviour
+    - Public POST/DELETE /api/public/tables/{qr}/cart/coupon (apply / remove).
+    - Cart totals honour the held coupon, and re-check it on every change: a coupon that
+      stops qualifying is dropped rather than silently discounting the bill.
+    - Codes are matched case-insensitively and scoped to the table's own restaurant.
+    - A use is claimed only when an order is placed, via a conditional UPDATE that
+      succeeds only while a use remains, so the usage limit holds under concurrent
+      checkouts. Cancelling an order releases the use (guarded against double release).
+      If a coupon runs out mid-checkout the order is placed at full price rather than
+      failing.
+    - applyCoupon is now a read-only quote and consumes nothing.
+    - Coupon endpoints restricted to ADMIN / RESTAURANT_OWNER / MANAGER, with the
+      restaurant taken from the signed-in user and ownership checked on every coupon id.
+    - Order and tracking responses expose the discount and the coupon code.
+
+  Frontend
+    - New CouponBox on the diner's checkout: collapsed "Have a coupon code?" prompt, a
+      code field that uppercases as you type, the applied code with the saving, and a
+      remove action. Refusals show the server's reason.
+    - The bill's discount line names the code that produced it.
+    - Order tracking shows the saving and bases the amount due on the discounted total.
+
+Verification
+  - CouponPricing: 10 unit tests written and RUN (56 pure tests now pass in total),
+    covering percentage and fixed discounts, the maximum-discount cap, minimum spend and
+    its shortfall message, every refusal reason, the zero-means-unlimited convention,
+    non-terminating division, and the invariant that discount + payable = basket.
+  - Diner coupon panel rendered in headless Chromium at 320 and 390px in all four states
+    (collapsed, entry, applied, refused). No horizontal overflow.
+  - CouponFlowIT written covering the whole flow, the usage limit, release on
+    cancellation, cross-restaurant refusal, the drop-when-unqualified rule and the
+    role/tenant guards - but NOT RUN (no Spring jars here; see Phase 3).
+  - [NOT VERIFIED] V19 against MySQL, ./gradlew test, npm typecheck/build/test.
+
+
+--------------------------------------------------------------------------------
+PHASE 5 - THREE REPORTED BUGS
+--------------------------------------------------------------------------------
+
+Reported: the kitchen board showed a just-placed order as "5h 30m ago"; the diner had no
+order time at all; and the order number was too long.
+
+1. Wrong elapsed time on the kitchen board (and everywhere else)
+   Cause: timestamps are stored as zone-less LocalDateTime values in the restaurant's
+   business zone, and were serialised bare ("2026-10-13T14:35:00"). The browser has no way
+   to know which zone such a value belongs to, so it assumes its own. Any device whose zone
+   differs from the server's therefore read EVERY time out by exactly that difference -
+   5h 30m being the Asia/Kolkata offset.
+   Fix: new config/JacksonConfig serialises LocalDateTime with the business zone's offset
+   for that date ("2026-10-13T14:35:00+05:30"), so the value is an unambiguous instant and
+   is correct from any device in any zone. Deserialisation is unchanged: request bodies may
+   still send a bare local date-time (the admin coupon form does).
+   Frontend: new parseServerTime() accepts both forms, so nothing breaks if an old response
+   is cached. lib/charts.ts now formats buckets in the timestamp's own zone, so an "8 PM"
+   bucket still reads 8 PM on a device in another country.
+
+2. No order time for the diner
+   The confirmation header now shows "Ordered at 2:35 PM · 4 min ago" under the order id.
+
+3. Order numbers were unusable
+   Was "ORD-20261013-290F2080CCD3": a date plus 12 random hex characters. Unique, but a
+   diner could not read it back to staff, nor staff call it across a kitchen.
+   Now "ORD-1", "ORD-2", ... from a per-restaurant counter (V20 migration), with the counter
+   row locked for the transaction so simultaneous orders take consecutive numbers, and the
+   number reused if the order then rolls back. Existing orders keep their numbers - diners
+   hold them in their browser's order history - and each restaurant's counter is seeded above
+   any short number already present, so new numbers cannot collide.
+   The diner header now reads "Order ID: ORD-1233" rather than just "Order ...".
+
+Verification
+  - format/charts helpers: 31 frontend tests written and RUN, including a case reproducing
+    the exact bug (a timestamp 5h30m "ago" in a +05:30 offset now reads as "just now"). The
+    whole suite was run under TZ=UTC, Asia/Kolkata, America/New_York and Pacific/Kiritimati
+    to prove the result no longer depends on the device zone.
+  - Diner confirmation header rendered in headless Chromium at 430px.
+  - [NOT VERIFIED] V20 against MySQL; the Jackson serializer and the order counter were not
+    compiled or run (no Spring jars here). Worth checking first after ./gradlew test: that
+    timestamps in API responses carry "+05:30", and that two orders placed together get
+    consecutive numbers.
+
+Kitchen header: the link to the admin console now reads "Dashboard" rather than "Admin".
+It points at /admin, whose first page is the dashboard, and the admin sidebar already calls
+that page "Dashboard" - so the label now matches its destination.
+
+
+--------------------------------------------------------------------------------
+PHASE 6 - INVENTORY, KITCHEN ORDERS TAB, COUPON BANNER
+--------------------------------------------------------------------------------
+
+1. Inventory never reduced  (reported)
+   Stock was only ever edited by hand on the Inventory page: no code path touched it when an
+   order was placed, so the counts drifted from reality as soon as the restaurant traded.
+   - New StockService: takes an order's items out of stock at placement, and puts them back
+     when an order is cancelled (guarded so a repeated cancellation cannot credit twice).
+   - The inventory row is locked for the transaction, so two tables ordering the last portion
+     cannot both succeed. A tracked dish with too little left throws, which rolls back the
+     whole order - including the coupon claim and the order number - rather than overselling.
+   - The in_stock flag now follows the count instead of needing correction by hand.
+   - The cart also checks stock as items are added, so a diner is told while still shopping
+     rather than after writing their notes and tapping Place order. The binding check remains
+     the one at placement.
+   - Dishes with no inventory row are untracked and unlimited, which is what a restaurant
+     expects: you track the twelve portions of mutton you prepped, not the salt.
+
+2. No orders view in the kitchen  (reported)
+   The board only shows work in progress, so an order vanished the moment it was served -
+   leaving the kitchen unable to see what had gone out or look up an order a diner asked about.
+   - New GET /api/v1/kitchen/orders/today (same kitchen roles as the rest of that controller):
+     today's orders in every status, newest first, scoped to the business day.
+   - The kitchen page now has Board / Orders tabs. The Orders tab is deliberately read-only, so
+     it cannot be mistaken for a second place to work from.
+
+3. Admin coupons page still warned that coupons did nothing
+   A leftover from before Phase 4: the banner read "Coupons are stored here, but they are not
+   yet applied to cart or order totals". Replaced with what staff actually need to know - diners
+   enter codes on the bill, and a use is only counted when an order is placed.
+
+Verification
+  - The 56 pure Java tests and 31 frontend tests still pass.
+  - Kitchen Orders tab rendered in headless Chromium at 1280 and 390px; no overflow.
+  - [NOT VERIFIED] StockService, the kitchen endpoint and the locking behaviour were not
+    compiled or run (no Spring jars here). Worth testing first: order a tracked dish and check
+    the count drops, then cancel and check it returns.
+
+
+--------------------------------------------------------------------------------
+PHASE 7 - DIAGNOSING "COUPON STILL NOT APPLYING"
+--------------------------------------------------------------------------------
+
+Re-reviewed the whole path by inspection and found no defect: the frontend calls
+POST /api/public/tables/{qr}/cart/coupon, that route exists and is covered by the
+"/api/public/**" permitAll rule, it is not shadowed by another mapping, the rate limiter
+does not block it, and the pricing rules are unit-tested (a 350 cart against a 200 minimum
+applies). Since the Spring layer cannot be compiled or run in this environment, the cause
+cannot be confirmed from here - so this phase makes the failure self-describing instead of
+guessing again.
+
+  - CartServiceImpl logs one line per attempt at INFO: applied (with the discount), refused
+    (with the CouponState reason, cart id and subtotal), or code not found (with the
+    restaurant id). The reason is now in the server log without the diner reporting it.
+  - api/client.ts: a 404 with no body now reads "This server does not have that feature yet.
+    It may need updating." rather than "Request failed (404)". That is the signature of a
+    backend older than the frontend, which is the most likely cause here and was previously
+    indistinguishable from a genuine not-found. A 404 that carries a server message still
+    shows that message. Covered by two new cases in api/client.test.ts.
+  - New docs/diagnose-coupon.sh: posts a code to the endpoint, prints the status with an
+    interpretation (404 = stale backend, 400 = refused with the reason in the body), echoes
+    the response and then the cart.
+
+[NOT VERIFIED] Still no Spring or MySQL in this environment; the new logging has not run.
+
+
+--------------------------------------------------------------------------------
+PHASE 8 - COUPON FIELDS READ AS QUANTITIES
+--------------------------------------------------------------------------------
+
+Reported: "discount is applying on items ... it should apply on rupees", then a screenshot
+showing a coupon with Minimum order = 2 and Value = 100.
+
+Not a calculation bug. "Minimum order" was a bare label with no unit, so a 2 entered meaning
+"two dishes" was stored as "two rupees" - which almost any bill clears, so a 100 discount came
+off a 350 bill. The field was always a currency amount; the form never said so.
+
+  - Every money and percentage field in the coupon form now carries its unit, and the discount
+    field relabels itself with the type: "Discount amount (₹)" or "Discount percentage (%)",
+    "Minimum order value (₹)", "Maximum discount (₹, optional)".
+  - Hints spell out the meaning, including the one that caused this: "The bill must reach this
+    amount in ₹, not a number of dishes. 0 for no minimum."
+  - A percentage discount is now capped at 100 by the input itself, matching the server rule.
+  - The usage limit accepted 1 and up, while the server has always treated 0 as unlimited. It
+    now accepts 0, with a hint saying so.
+  - The form reads its own numbers back as a sentence before saving ("WELCOME takes ₹100.00 off
+    the bill on bills of ₹2.00 or more."), so a value meant as a quantity is obvious. It only
+    restates the fields - the server still owns the arithmetic.
+  - New currencySymbol() in lib/format, derived from the same formatter as every amount, so a
+    different VITE_CURRENCY relabels the form too.
+
+There is no minimum-item-count rule anywhere in the system; only a minimum order value. Say so
+if you want one added.
+
+
+--------------------------------------------------------------------------------
+PHASE 9 - MINIMUM NUMBER OF DISHES ON A COUPON
+--------------------------------------------------------------------------------
+
+Requested: a minimum order value in currency was the only requirement a coupon could carry,
+and it was being read as a quantity. Both now exist as separate fields.
+
+  - V21 migration: coupons.minimum_items INT NOT NULL DEFAULT 0, with a CHECK that it cannot
+    go negative. 0 means no requirement, matching how usage_limit already treats 0. Existing
+    coupons default to 0, so none of them changes behaviour.
+  - CouponPricing.evaluate now takes the dish count (quantities summed, so three of one dish
+    counts as three) and returns BELOW_MINIMUM_ITEMS with how many more are needed. The amount
+    is checked first: if a diner is short on both, they hear about the money, which is the
+    harder of the two to satisfy by accident.
+  - The cart passes its own dish count, and refuses with "This coupon needs at least 3 dishes.
+    Add 1 more dish to use it."
+  - /api/v1/coupons/apply quotes against a bare amount with no basket, so it cannot judge the
+    dish rule and skips it; the cart is where that rule is enforced.
+  - Admin form: "Minimum number of dishes" beside "Minimum order value (₹)", each with a hint
+    naming its unit, and the summary sentence covers both ("... on bills of ₹200.00 or more
+    that include at least 2 dishes."). The coupon list shows both requirements.
+
+Verification
+  - CouponPricing: 5 new unit tests written and RUN (61 pure Java tests pass in total) covering
+    the count rule alone, combined with an amount, which shortfall is reported when both are
+    short, how many more dishes are needed, and 0 meaning no requirement.
+  - CouponFlowIT gained a case that clears the money but not the count, then adds a third dish
+    - written, NOT RUN (no Spring jars here).
+  - Admin form rendered in headless Chromium.
+  - [NOT VERIFIED] V21 against MySQL.
+
+
+--------------------------------------------------------------------------------
+PHASE 10 - SECURITY AUDIT REMEDIATION
+--------------------------------------------------------------------------------
+
+See SECURITY_AUDIT_REPORT.md for the findings and REMEDIATION.md for the per-finding fix
+record and the required verification steps. Summary:
+
+  SEC-005 (High)     Profile defaults to prod; dev's literal JWT secret removed; placeholder
+                     secrets refused at startup. Closes an authentication-bypass path that
+                     opened whenever SPRING_PROFILES_ACTIVE was unset.
+  SEC-001 (Critical) SecurityConfig ends in denyAll() with explicit role matchers, and the
+                     eleven unguarded controllers gained class-level @PreAuthorize. A
+                     forgotten annotation is now a 403 instead of an open endpoint.
+  SEC-002 (Critical) Payment settings, inventory and notifications derive the restaurant from
+                     the principal instead of the request. Inventory listing no longer calls
+                     findAll(); every by-id operation checks ownership.
+  SEC-003 (High)     New StompAuthChannelInterceptor: STOMP CONNECT requires a bearer token
+                     and SUBSCRIBE is restricted to the subscriber's own restaurant topic.
+                     The frontend sends the token on connect.
+  SEC-004 (Medium)   V22 adds orders.public_token (192-bit SecureRandom). Public tracking and
+                     diner payment moved to /api/public/orders/by-token/{token}; ORD-n stays
+                     as the readable label. Public order GETs are now rate limited.
+  SEC-006 (Medium)   V23 adds users.tokens_valid_from; POST /api/v1/auth/logout revokes every
+                     token issued earlier for that user. One-second precision limit documented.
+  SEC-008 (Low)      Auth logs carry user ids, not email addresses.
+  SEC-010 (Low)      websocket-test.html deleted; actuator narrowed to the two probes.
+  Not changed        SEC-007 (per-account lockout), SEC-009 (dependency scanning), SEC-011
+                     (localStorage, accepted), SEC-012 (TLS, deployment question).
+
+Breaking: profile default, mandatory JWT_SECRET, diner tracking URLs, /actuator/info now
+authenticated, STOMP requires a token, migrations V22 and V23.
+
+New tests: AuthorizationBoundaryIT (10 negative cases). The three existing ITs were re-keyed
+to the public order token.
+
+Verification
+  - 61 pure Java tests and 31 frontend tests still pass; all sources parse.
+  - [NOT VERIFIED] Nothing in the Spring layer was compiled or run - no jars or database in
+    this environment. These are invasive authorization changes: ./gradlew test is required,
+    and the kitchen live feed and the diner order/track flow should be exercised by hand.
+
+Phase 10 addendum - verification of the security fixes
+  ./gradlew test cannot run here (the wrapper cannot download Gradle; no dependency cache, no
+  database), so two static verifiers were written and mutation-tested instead; both are in docs/.
+    - docs/authz_check.py: resolves every endpoint against the SecurityConfig matchers and the
+      class-level @PreAuthorize and reports the effective roles, flagging endpoints that fall
+      through to denyAll, filter/method-security contradictions, paths a CUSTOMER can still reach,
+      duplicated non-repeatable annotations, and entity columns missing from the migrations.
+    - docs/migration_check.py: version uniqueness and create-before-alter ordering.
+  Found and fixed: PaymentController carried TWO class-level @PreAuthorize annotations after the
+  bulk edit, which would not have compiled (@PreAuthorize is not repeatable). The pre-existing one
+  was kept - it also excludes CHEF from payment endpoints, which is the right policy. Also made the
+  logout rule explicit in the filter chain, and aligned the categories/menu-items rules between the
+  two layers. A repo-wide scan for control-character corruption from scripted edits found none.
+  61 pure Java tests and 31 frontend tests still pass; all sources parse.
+
+
+--------------------------------------------------------------------------------
+PHASE 11 - PLATFORM OWNER: ROLE, BOOTSTRAP AND AUDIT LOG (phases 1-2 of the plan)
+--------------------------------------------------------------------------------
+
+See PLATFORM_ADMIN_PLAN.md for the findings and the full design. Decisions applied: no
+commission model (the owner sees real collected revenue only); no approval workflow in phase 1
+(suspend/reactivate only, and no fabricated "pending approvals" tile); MFA deferred; the
+existing ADMIN role left untouched.
+
+1. The role (V24)
+   - RoleName.PLATFORM_OWNER, seeded by migration. Deliberately NOT added to the MANAGEMENT,
+     STAFF or KITCHEN groups: ADMIN and friends are restaurant-scoped roles whose handlers
+     resolve data through the caller's own restaurant, and a platform owner has none. The
+     isolation runs both ways - a platform owner is refused by every restaurant-scoped API.
+   - SecurityConfig: /api/platform-admin/** requires hasRole('PLATFORM_OWNER'); only
+     /api/platform-admin/claim is public.
+   - CurrentUserServiceImpl.getCurrentRestaurantId() now throws AccessDeniedException instead
+     of dereferencing a null restaurant. Previously that was a NullPointerException and a 500
+     for any account without a restaurant, which read as a server fault rather than a refusal.
+
+2. Bootstrap without a stored credential (V24 columns + PlatformOwnerBootstrap)
+   - With PLATFORM_OWNER_EMAIL set and no platform owner present, start-up creates a DISABLED
+     account with an unusable password and logs a single-use claim token; only the token's hash
+     is stored. POST /api/platform-admin/claim sets the password, activates the account and
+     consumes the token.
+   - Refuses to promote an address that already has an account - silently granting platform
+     privileges to an existing restaurant account is the escalation this design exists to stop.
+   - Never creates a second owner. Fails closed when the variable is unset. Claim failures all
+     return one identical message, so the endpoint does not reveal which addresses exist. The
+     endpoint is rate limited in the same bucket as sign-in.
+
+3. Audit log (V25)
+   - New audit_log table plus AuditAction / AuditEntry / AuditRepository / AuditService.
+     Actor email and role are copied in as values, so an entry stays readable after the account
+     changes or goes away; actor_user_id is deliberately not a foreign key.
+   - Written in its own transaction (REQUIRES_NEW on the public methods - on the private writer
+     it would have been bypassed by self-invocation), so a failed sign-in still leaves a trace
+     on a path that then throws. A write failure is logged and swallowed rather than failing the
+     operation being audited.
+   - Hooked up: LOGIN_SUCCEEDED, LOGIN_FAILED, LOGGED_OUT, and the three platform bootstrap and
+     claim actions. No update or delete path exists; for real immutability also revoke UPDATE
+     and DELETE on the table from the application's database user.
+
+4. Tests and verification
+   - New PlatformAdminAuthorizationIT: anonymous/customer/owner/manager refused on every
+     platform path; platform owner admitted; platform owner refused by restaurant-scoped APIs;
+     role smuggling through registration still yields CUSTOMER; claim is single-use, expiry
+     enforced, replay refused, weak password refused; failed and successful sign-ins are
+     audited; no audit row carries a submitted password. The suite also asserts that every
+     handler in the platform controllers is listed in its own path list, so a later endpoint
+     cannot quietly escape the refusal tests.
+   - docs/authz_check.py gained a platform-isolation check: PLATFORM_OWNER may appear only on
+     /api/platform-admin/** and no restaurant role may appear there. The role groups are now
+     parsed from SecurityConfig rather than hardcoded - the first version of this check missed a
+     mutation that added PLATFORM_OWNER to the MANAGEMENT constant, which is exactly the
+     regression it exists to catch.
+
+Verification
+  - 61 pure Java tests pass; all sources parse; the authorization matrix, platform isolation,
+    duplicate-annotation, entity/migration and migration-ordering checks are clean, and the
+    platform check was mutation-tested in both directions.
+  - [NOT VERIFIED] Nothing in the Spring layer was compiled or run: no Gradle, no dependency
+    cache, no database. PlatformAdminAuthorizationIT has never executed, and V24/V25 have never
+    been applied. ./gradlew test is required.
+
+Still to come (phases 3-6): overview/restaurants/users/orders/analytics endpoints, the
+/platform-admin frontend area, and the curated health endpoint.
+
+
+--------------------------------------------------------------------------------
+PHASE 12 - OBSERVABILITY, MONITORING AND PERFORMANCE TESTING
+--------------------------------------------------------------------------------
+
+See OBSERVABILITY_PLAN.md for the analysis, OBSERVABILITY_SETUP.md, PERFORMANCE_TESTING_GUIDE.md
+and MONITORING_ALERTS.md for operation. Decisions applied (the six questions went unanswered, so
+my own recommendations were used): separate management port; remote write enabled on the private
+network only; JSON logging now and Loki/Tempo deferred; NO public telemetry endpoint, so the
+frontend gets an error boundary and nothing is transmitted; Grafana-managed alerting; the MySQL
+0.0.0.0:3306 binding left flagged but untouched as an unrelated change.
+
+Dependencies added (2 backend, 0 frontend)
+  - io.micrometer:micrometer-registry-prometheus (runtimeOnly, version from the Boot BOM)
+  - net.logstash.logback:logstash-logback-encoder:8.0 (JSON logs on the prod profile)
+  web-vitals was deliberately NOT added: without an ingest endpoint it would be a dependency that
+  produces no signal.
+
+Metrics
+  - Actuator moved to MANAGEMENT_PORT (default 9091), never published and never proxied by nginx.
+    Protection is by topology, not by a credential that would fail exactly when the auth stack is
+    unhealthy. A dedicated actuatorFilterChain refuses Actuator requests that arrive on the
+    application port, so collapsing the two ports fails closed.
+  - percentiles-histogram (not client-side percentiles) for http.server.requests, with explicit SLO
+    buckets: per-instance percentiles cannot be aggregated across replicas or over time.
+  - max-uri-tags capped at 150. The uri tag is already Spring's route template, so ids and tokens
+    never become labels.
+  - ONE custom metric: app.authentication.failures, counts only, no identifiers, bounded reason tag.
+    Authorization failures deliberately got none - they are already visible as status="403".
+
+Prometheus, Grafana, alerts
+  - prometheus/prometheus.yml plus a production variant (longer interval, no remote-write receiver).
+  - 9 alert rules, all with sustained windows, all error rules as clamp_min-guarded ratios. The
+    authentication rule is named and worded as an anomaly, not an attack.
+  - 6 dashboards generated by docs/build_dashboards.py so every panel is structurally identical and
+    all the PromQL sits in one reviewable place. Two panels are intentionally empty and say so on
+    the dashboard rather than being padded with placeholder data.
+  - docker-compose.observability.yml overlay: pinned images, named volumes, healthchecks, Grafana
+    on 127.0.0.1 only, Prometheus with no host port, admin password with no default.
+
+k6
+  - smoke / baseline / stress / spike / soak / authenticated, covering the diner journey and the
+    staff journey, all parameterised, all seeding their own throwaway data.
+  - Thresholds are documented as hypotheses to calibrate from a baseline run, not as SLOs.
+  - assertLoadTestingAllowed() refuses anything heavier than smoke outside an explicitly named test
+    environment. The first version was FAIL-OPEN - ENVIRONMENT defaulted to 'local', so forgetting
+    the variable authorised a load test against any BASE_URL. Caught by unit-testing the guard.
+
+Logging and frontend
+  - logback-spring.xml: the existing readable pattern on dev, one JSON object per line on prod with
+    requestId (already set by RequestIdFilter) as a queryable field. The now-ignored
+    logging.pattern.console was removed rather than left looking authoritative.
+  - ErrorBoundary around the route tree: a render failure shows a message instead of a blank screen.
+    Nothing is transmitted anywhere.
+
+Verification
+  - EXECUTED: all YAML/JSON/XML parses; all 66 PromQL expressions checked against the metric names
+    Micrometer actually exports (33 distinct, no unknowns), including histogram_quantile-without-le
+    and unguarded-division traps, with the checker mutation-tested against 4 failure modes; k6
+    scripts parse and the guard logic unit-tested; 61 Java and 31 frontend logic tests still pass;
+    the authorization-matrix, platform-isolation, duplicate-annotation, entity/migration and
+    migration-ordering verifiers are clean; no literal credential in any config file.
+  - [NOT VERIFIED] The application building or starting, Prometheus scraping, Grafana connecting,
+    panels rendering, any k6 run, and any alert evaluation. No network, no Docker daemon, no
+    database, no k6 binary, and Gradle cannot download itself here. OBSERVABILITY_SETUP.md ends
+    with an 8-step checklist in the order to run it; step 5 proves the management port is NOT
+    reachable from the host, which is the one that matters.
+
+Still flagged, not changed: docker-compose.yml publishes MySQL on 0.0.0.0:3306 while the app
+correctly binds 127.0.0.1:8080. One-character fix, left alone as out of scope.
+
+
+--------------------------------------------------------------------------------
+PHASE 13 - BUG FIX GROUP 1: CART CONCURRENCY (BUG-001, BUG-007)
+--------------------------------------------------------------------------------
+
+See FULL_STACK_BUG_AUDIT.md and BUG_FIX_PLAN.md. No schema change (highest migration is still
+V25), no unrelated code touched.
+
+Root cause
+  Cart operations were not serialised per table. The cart belongs to a TABLE, not a person, and the
+  QR flow is unauthenticated, so two phones at one table are two concurrent writers by design.
+
+  Three races, not the two the audit reported:
+    1. placeOrder read the ACTIVE cart with no lock and set CHECKED_OUT as its last statement, so a
+       double-tap produced two orders, double stock deduction and two coupon claims.
+    2. getOrCreateActiveCart had a find-then-insert race. carts has NO unique constraint on
+       (restaurant_table_id, status), so two concurrent first requests each inserted an ACTIVE cart;
+       findByRestaurantTableAndStatus then matched two rows and threw on every later read - a
+       PERMANENT 500 for that table. Found while implementing the fix; worse than BUG-001 and not in
+       the audit.
+    3. Concurrent cart mutations could compute totals from a basket missing the other's item.
+
+Fix
+  The lock is on restaurant_tables, not on carts. A pessimistic lock on a SELECT matching no rows
+  locks nothing, so locking the cart cannot prevent race 2; the table row always exists and every
+  cart operation already loads it.
+  - RestaurantTableRepository: findByQrIdentifierForUpdate / findByIdForUpdate (PESSIMISTIC_WRITE).
+  - CartServiceImpl.getRestaurantTable now takes the lock, so all cart paths serialise through one
+    place. Reads take the write lock too: a read-only variant would be cheaper, but two helpers
+    differing only in locking are easy to mix up and the lock is held for milliseconds.
+  - OrderServiceImpl.placeOrder locks the table FIRST, then reads the cart, so the second of two
+    checkouts waits and is then refused with the existing "No active cart found".
+
+  Documented lock order: restaurant_tables -> coupons -> order counter -> inventory. Reordering in
+  one place is enough to deadlock two checkouts at different tables on the shared inventory rows.
+
+Impact on existing behaviour
+  - Cart operations serialise per table (intended). No API, DTO or UI change.
+  - A duplicate submit now fails cleanly instead of double-ordering.
+  - NOT added: a unique index on (restaurant_table_id, status). It would be belt-and-braces but is a
+    schema change, which was not approved. The lock is sufficient on its own.
+
+Tests added: CartConcurrencyIT - five cases with a latch-based helper that releases threads together
+(starting them sequentially often lets the first finish before the last begins, which would pass
+falsely). Covers: one order from two simultaneous checkouts; stock moved once; coupon claimed once;
+four simultaneous first requests produce one cart and a subsequent read returns 200; concurrent adds
+both land with a subtotal matching the lines.
+
+Verification
+  - EXECUTED: Java syntax clean; a lock-order checker across all multi-lock methods (including
+    cross-file inventory locks via StockService) confirms every path follows the documented order;
+    authorization/platform/entity-migration verifiers clean; migration ordering clean; 61 pure Java
+    and 31 frontend logic tests still pass.
+  - [NOT VERIFIED] CartConcurrencyIT has NOT been run - ./gradlew cannot resolve Gradle in this
+    environment. The tests that prove this fix are precisely the ones that could not be executed.
+
+
+--------------------------------------------------------------------------------
+PHASE 14 - BUG FIX GROUP 2 (PART): TRANSITIONS AND CANCELLATION (BUG-003, BUG-004)
+--------------------------------------------------------------------------------
+
+BUG-002 (the stock restore asymmetry) is NOT in this change: it needs a column on order_items,
+which is a schema change and was not approved. Noted in the code at the exact spot.
+
+BUG-003 - any order status could follow any other
+  Root cause: two write paths to Order.status, only one validated. The transition table lived
+  privately in KitchenServiceImpl; PUT /api/v1/orders/{id}/status parsed the enum and assigned it.
+  Fix: extracted the table unchanged into service/OrderStatusPolicy, called from both paths. Added
+  one rule the original lacked: current == next is allowed, so a retry after a dropped response is
+  a no-op rather than a failure.
+  The rules match what the admin Orders page already offers (Cancel shown only for PENDING and
+  CONFIRMED), so nothing a user could legitimately do before is now refused.
+
+BUG-004 - cancellation abandoned payments
+  Root cause: the cancellation branch handled the coupon and the stock and never looked at payments
+  (grep for "payment" in OrderServiceImpl returned nothing).
+  Fix: PaymentService gained cancelPendingPaymentsForOrder and hasCapturedPayments. Cancelling now
+  cancels PENDING payments, so a diner's abandoned choice stops sitting in the reconciliation
+  panel's awaiting-confirmation bucket for ever; and cancellation is REFUSED when any payment has
+  been captured, with a message directing the user to refund first. Auto-refunding would make a
+  status change move money, which must stay an explicit, recorded act.
+
+Files: service/OrderStatusPolicy.java (new), service/impl/OrderServiceImpl.java,
+service/impl/KitchenServiceImpl.java, service/PaymentService.java + impl,
+src/test/.../OrderCancellationIT.java (new). No schema change (highest migration still V25).
+
+Behaviour changes to be aware of
+  - A PREPARING or READY order can no longer be cancelled through either path. That was already the
+    kitchen's rule and the frontend already hid the button; the REST endpoint was the hole.
+  - A paid order cannot be cancelled until it is refunded. If staff were using cancel as an undo for
+    a mistaken payment, they now need the refund flow.
+
+Verification
+  - EXECUTED: OrderStatusPolicy compiled and run against a 31-case truth table - 31/31 pass, real
+    execution, covering the forward path, cancellation windows, backwards/skipping transitions and
+    both terminal states. A stray brace from the KitchenServiceImpl edit was caught by the Java
+    syntax check and fixed. Lock order still consistent; NO bean dependency cycle introduced by
+    OrderService -> PaymentService (checked with a service graph walk); authorization, platform,
+    entity/migration and migration-ordering verifiers clean; 61 pure Java and 31 frontend logic
+    tests pass.
+  - [NOT VERIFIED] OrderCancellationIT (7 cases) has not been run - ./gradlew cannot resolve Gradle
+    here. The reconciliation and payment assertions in particular need a real database.
+
+
+--------------------------------------------------------------------------------
+PHASE 15 - BUG FIX GROUP 2 (COMPLETED): STOCK RESTORE SYMMETRY (BUG-002)
+--------------------------------------------------------------------------------
+
+Completes group 2. Migration V26 and the 0 backfill were taken as approved.
+
+Root cause
+  Deduction and restoration disagreed about what had happened. consumeForOrder skipped dishes with
+  no inventory row AT THE TIME; restoreForOrder added back item.getQuantity() for any dish that has
+  a row NOW. A dish can start being tracked between placement and cancellation, so cancelling then
+  credited stock that was never taken - inflating the count and permitting the overselling the
+  stock feature exists to prevent.
+
+Fix
+  - V26__order_item_stock_consumed.sql: order_items.stock_consumed INT NOT NULL DEFAULT 0, with a
+    non-negative CHECK. Additive and reversible; no existing data is rewritten.
+  - OrderItem.stockConsumed records what each line actually took (0 for an untracked dish).
+  - consumeForOrder writes it; restoreForOrder reads it, skips lines that took nothing, and clears
+    the marker so a repeated restoration cannot credit twice even if called directly.
+
+Backfill: 0, so cancelling an order placed before V26 restores nothing. Understating stock loses a
+sale; overstating it oversells and disappoints a diner who has already ordered. The alternative -
+backfilling quantity for tracked dishes - would reproduce the bug for historical rows.
+
+Tests added to OrderCancellationIT
+  - cancellingDoesNotCreditStockThatWasNeverTaken: place while untracked, switch tracking on, cancel,
+    assert the count is unchanged. This is the BUG-002 reproduction and fails on the old code.
+  - stockIsRestoredOnlyOnceEvenIfCancellationIsRepeated: cancel twice, assert one credit.
+
+Verification
+  - EXECUTED: a symmetry checker asserting consume records what it took, restore reads it, restore
+    never falls back to getQuantity(), and the marker is cleared. Its first run gave a FALSE POSITIVE
+    by matching getQuantity() inside a comment describing the bug; after stripping comments, all four
+    properties hold. Entity/migration consistency clean (ddl-auto=validate would otherwise fail at
+    startup on the new column). Migration ordering clean, 26 migrations. OrderStatusPolicy 31/31.
+    61 pure Java and 31 frontend logic tests pass. No Java syntax errors.
+  - [NOT VERIFIED] V26 has never been applied to MySQL, and the 9 cases now in OrderCancellationIT
+    plus the 5 in CartConcurrencyIT have never been run.
+
+
+--------------------------------------------------------------------------------
+PHASE 16 - BUG FIX GROUP 3: ORDER LISTING (BUG-005, BUG-009)
+--------------------------------------------------------------------------------
+
+BREAKING: GET /api/v1/orders now returns a page, not a bare array. Both halves land together;
+the only consumer was orderApi.list().
+
+Root cause
+  BUG-005: getOrders() called findByRestaurant with no pagination, no date bound and no fetch
+  strategy, so it returned every order the restaurant had ever taken and the mapper then triggered
+  one query per order for its lazy items.
+  BUG-009: the Orders page compounded it from the browser - each row ran its own payment-summary
+  query with a 30s refetch, so N orders meant N HTTP requests every half minute.
+
+Fix
+  - OrderRepository: Page<Order> findByRestaurantOrderByIdDesc(...) plus a separate
+    findWithItemsByIdIn for the page's ids. Deliberately NOT an items @EntityGraph on the paged
+    query: fetch-joining a collection alongside a Pageable makes Hibernate apply the limit IN MEMORY
+    (HHH90003004) - it reads every row and discards most, which is worse than the N+1 it replaces.
+    Two bounded queries instead.
+  - PaymentService.getBalances(orders): payment state for the whole page in two queries, so adding
+    the payment columns did not move the N+1 from the browser to the server.
+  - OrderResponse carries paymentStatus, amountPaid and balanceDue.
+  - Page size capped server-side at 100, so size=100000 cannot reintroduce the unbounded list.
+  - Frontend: paged query with Previous/Next; PaymentCell reads the row and no longer queries. The
+    confirm dialog fetches the pending payment itself when opened - once, on demand, instead of
+    every row fetching it on the chance it is clicked. It also handles the payment having been
+    confirmed or the order cancelled between the list loading and the dialog opening.
+
+Not changed: getOrdersByStatus is still unbounded. It has no frontend consumer, so paginating it was
+left out of this group rather than widening the change.
+
+Tests added: OrdersPaginationIT (5 cases) - page size respected, newest first, oldest on the last
+page, size cap enforced, each row carries payment state and items, an unpaid order reports its full
+balance, and one restaurant never sees another's orders through the paged query.
+
+Verification
+  - EXECUTED: a new docs/paging_check.py asserting no paged query fetch-joins a collection. It
+    resolves each named attribute against its entity so to-ONE fetch joins (PaymentRepository's
+    order/recordedBy) are correctly not flagged. It took two corrections to be trustworthy: the
+    first version matched the javadoc text describing the trap, and the second treated every
+    collection as to-one because the regex required ';' immediately after the field name while
+    Order.items is declared with an initialiser. Mutation-tested afterwards: adding an items
+    @EntityGraph to the paged query is now caught.
+  - Also EXECUTED: a static check that getOrders batches balances, loads items in one query and caps
+    the page size; lock order consistent; no bean cycles; authorization/platform/entity-migration
+    and migration-ordering verifiers clean; OrderStatusPolicy 31/31; 61 pure Java and 31 frontend
+    logic tests pass; all frontend sources parse.
+  - [NOT VERIFIED] OrdersPaginationIT has not been run, and no query count has been MEASURED - the
+    N+1 removal is reasoned from the code and the static checks, not observed. Confirm with a
+    Hibernate statistics assertion or the SQL log on your side.
+
+
+--------------------------------------------------------------------------------
+PHASE 17 - BUG FIX GROUP 4: THE QUICK MEDIUMS (BUG-006, 008, 010, 011, 012)
+--------------------------------------------------------------------------------
+
+No schema change. Five findings, each small and independent.
+
+BUG-006 (availability half) + BUG-008 - placement did not re-validate
+  Root cause: the cart checked availability when an item was ADDED and the coupon only when the cart
+  CHANGED. placeOrder then trusted both. So an item switched off after being added still reached the
+  kitchen, and a cart left untouched across a coupon's expiry kept its discount - claimOneUse checks
+  the usage limit alone, not dates or the active flag.
+  Fix: placeOrder re-checks every item's active/available flags and refuses naming the dish, and
+  re-evaluates the coupon with CouponPricing before claiming, recomputing the discount from the
+  coupon's current terms rather than trusting the cart. A coupon that no longer qualifies drops the
+  discount rather than failing the order - losing the sale over an expired code is worse.
+  DELIBERATELY NOT CHANGED: the price stays as captured when the item was added. The diner is
+  charged what they were shown; this is a policy, now stated where the staleness is created.
+
+  Also removed a duplication found while doing this: the Coupon -> CouponPricing.Terms mapping was
+  written out in both CartServiceImpl and CouponServiceImpl, and a third copy was about to be added.
+  Now one CouponTerms.of(). Three copies of a null-handling rule is three chances to disagree.
+
+BUG-010 - requests could hang for ever
+  Root cause: fetch has no timeout, so a connection that opens and stalls never settles and the
+  loading state spins indefinitely - the common failure on a phone moving between cells.
+  Fix: AbortController in the shared send(), with budgets by kind: 10s reads, 15s ordinary writes,
+  30s for order placement, payment collection/refunds AND the CSV export (a GET, but it assembles up
+  to 50,000 rows, so the read budget would have cut off exactly the large exports that matter). An
+  abort reports "took too long" rather than "check your connection", which points at the right thing.
+
+BUG-011 - /order/undefined
+  Root cause: publicToken was typed optional but used unguarded in navigation, so a frontend deployed
+  ahead of the backend would strand a diner on a dead page with a real order behind it.
+  Fix: the field is now required in the type (it is non-null server-side) and the navigation falls
+  back to the menu carrying the order number, so the diner at least knows the order exists.
+
+BUG-012 - derived query could fail at startup
+  existsByRoleName -> existsByRole_Name, stating the role -> name traversal instead of relying on
+  Spring Data's property-splitting fallback. The failure mode was a context that would not boot.
+
+Verification
+  - EXECUTED: the timeout routing table, as a real run - 9 cases covering reads, ordinary writes, the
+    three heavy writes and the export, all as specified. Java syntax clean; paging guard clean; only
+    ONE construction of CouponPricing.Terms remains in the codebase (was three sites); authorization,
+    platform, entity/migration and migration-ordering verifiers clean; OrderStatusPolicy 31/31; 61
+    pure Java and 31 frontend logic tests pass; all frontend sources parse.
+  - Tests added to api/client.test.ts for the stalled request and the longer order budget; they use
+    vitest fake timers and HAVE NOT been run - vitest cannot install here.
+  - [NOT VERIFIED] No integration test has been run across any group. There are now 19 unexecuted IT
+    cases plus these 2 frontend cases.
+
+
+--------------------------------------------------------------------------------
+PHASE 18 - BUG FIX GROUP 5: CLEANUP (BUG-015, BUG-016)
+--------------------------------------------------------------------------------
+
+BUG-015: removed UserRepository.findUnclaimedPlatformAccounts - never called, and leaving it implied
+  there is a supported way to enumerate unclaimed platform accounts. The java.util.List import is
+  still needed by findByRestaurantIdOrderByNameAsc, so it stays.
+
+BUG-016: docker-compose.yml now publishes MySQL as 127.0.0.1:3306 rather than 0.0.0.0:3306. The app
+  has always bound 127.0.0.1; the database had not, so it was reachable from the LAN. Anyone who
+  connected from another machine now needs an SSH tunnel - a real behaviour change for a developer
+  workflow, hence the comment in the file.
+
+NOT changed, deliberately:
+  BUG-013 (getCurrentUser re-queries per request) - Hibernate's first-level cache may absorb this
+    entirely within a transaction. Changing it without profiling adds risk for no measured gain. The
+    metrics added in phase 12 are the way to settle it.
+  BUG-014 (CSV export assembled in memory) - an accepted trade-off: a mid-stream failure produces a
+    clean error rather than a truncated download. Revisit when platform-wide exports exist.
+
+FINAL STATE OF THE AUDIT
+  Fixed:        BUG-001..012, 015, 016   (Critical 1, High 4, Medium 7, Low 2)
+  Deliberately open: BUG-013 (needs evidence), BUG-014 (accepted trade-off)
+
+  Verification executed across all five groups: Java syntax; both compose files parse; the paging
+  guard (no paged query fetch-joins a collection); authorization/platform-isolation/duplicate-
+  annotation/entity-migration; migration ordering (26); PromQL (66 expressions); OrderStatusPolicy
+  31/31; timeout routing 9/9; the k6 production guard; 61 pure Java and 31 frontend logic tests; all
+  frontend sources parse.
+
+  [NOT VERIFIED] 20 integration test cases across CartConcurrencyIT (5), OrderCancellationIT (10) and
+  OrdersPaginationIT (5) have NEVER BEEN RUN, nor have the 2 new frontend timeout cases. Gradle
+  cannot resolve in this environment and the npm install is unreliable here. No query count has been
+  measured, no migration applied, no concurrency behaviour observed. ./gradlew test and
+  npm run typecheck && npm test are required before any of this is deployed.
+
+
+--------------------------------------------------------------------------------
+PHASE 19 - DATABASE AUDIT REMEDIATION, STEPS 1-3 (DB-01, DB-05, DB-08, DB-11)
+--------------------------------------------------------------------------------
+
+See DATABASE_AUDIT.md. Implemented the first three steps of the recommended order; the rest are
+deliberately still open (below).
+
+DB-01 + DB-08 indexes - V27__order_and_notification_indexes.sql
+  Pure additions: no column, constraint or data change, and nothing in the application depends on
+  them. Safe to apply and to drop.
+    idx_orders_restaurant_created            (restaurant_id, created_at)
+    idx_orders_restaurant_status_created     (restaurant_id, status, created_at)
+    idx_notifications_restaurant_created     (restaurant_id, created_at)
+    idx_notifications_restaurant_read_created(restaurant_id, is_read, created_at)
+  NOT added: an index for the paged order list. InnoDB appends the primary key to every secondary
+  index, so the existing FK index on restaurant_id is physically (restaurant_id, id) and already
+  serves that filter and its ORDER BY id DESC. A separate index would be redundant - which is also
+  why the paged query orders by id rather than created_at.
+
+DB-05 - N+1 on the kitchen endpoints
+  KitchenOrderResponse carries line items, so mapping a list straight from a query that does not
+  fetch them cost one SELECT per order - on endpoints polled every 20 and 30 seconds by every open
+  kitchen display. All three list reads (pending, active board, today) now go through one withItems()
+  helper that loads the items for the whole set in a single query, the same two-query pattern the
+  paged order list uses. A collection fetch join was NOT used: on any paged query it forces Hibernate
+  to page in memory.
+
+DB-08 - unbounded reads
+  - Notification history paged end to end (repository, service, controller), size capped at 100.
+    The unread list stays a plain List: it is bounded by being unread and the admin shell polls it
+    expecting an array. BREAKING: GET /api/v1/notifications now returns a page - it has no frontend
+    consumer, so nothing in this repository changes.
+  - Removed two dead unbounded queries with no callers: OrderRepository.findByRestaurant (superseded
+    by the paged version) and findByRestaurantTable (every order for a table, forever).
+
+DB-11 - deadlock exposure on inventory locks
+  Inventory rows were locked in order-line iteration order, and Order.items is a List with no
+  @OrderBy, so two orders containing the same dishes in opposite line order could acquire the same
+  rows in opposite order. Both consumeForOrder and restoreForOrder now lock in menu item id order.
+
+Still open, deliberately
+  DB-02 (coupon lookup wraps the indexed column in upper()) - the fix normalises stored codes, so it
+    touches data; small table, so no urgency.
+  DB-03 (audit search defeats its indexes) - the largest code change of the set; table still small.
+  DB-07 (no DB guarantee of one active cart per table) - needs a generated column plus a duplicate
+    check before it can be applied.
+  DB-06 (per-restaurant checkout serialisation on the order counter) - MEASURE FIRST. Watch
+    hikaricp_connections_pending during the k6 baseline.
+  DB-10 (websocket publish inside the notification transaction) - harmless with the in-memory broker;
+    would matter with an external one.
+
+Verification
+  - EXECUTED: Java syntax clean; migration ordering clean (27); every column referenced by V27 exists
+    in an earlier migration (a CREATE INDEX on a mistyped column fails at migrate time and ddl-auto
+    validate would not catch it); the paging guard still clean; a check that all three kitchen list
+    reads batch their items; a check that both stock paths lock in deterministic order;
+    authorization/platform/entity-migration verifiers clean; OrderStatusPolicy 31/31; 61 pure Java
+    logic tests pass; all frontend sources parse.
+  - [NOT VERIFIED] No EXPLAIN, no query plan, no row count, no timing - there is still no database in
+    this environment. The indexes are reasoned from query shape and DDL, NOT measured. V27 has never
+    been applied. The N+1 removal has not been observed as a query-count reduction. Run the three
+    queries at the end of DATABASE_AUDIT.md before and after to confirm the indexes are actually
+    chosen by the planner.
+
+
+--------------------------------------------------------------------------------
+PHASE 20 - DATABASE AUDIT REMEDIATION, STEPS 4-5 (DB-02, DB-03, DB-07, DB-10)
+--------------------------------------------------------------------------------
+
+Completes the database audit except DB-06, which is deliberately left alone (below).
+
+DB-07 - one active cart per table is now a database guarantee (V28)
+  The application already serialises cart operations by locking the table row, but the database still
+  permitted two ACTIVE carts per table - and if one ever appeared, findByRestaurantTableAndStatus
+  would match two rows, fail to fit an Optional, and throw on EVERY later cart read for that table.
+  MySQL has no partial indexes, so uniqueness is expressed through a STORED generated column that is
+  NULL unless the cart is ACTIVE; NULLs do not collide, so any number of CHECKED_OUT carts stay legal.
+  This also gives that lookup an index it never had. The migration documents the duplicate-detection
+  query to run if it fails to apply.
+
+DB-02 - the coupon lookup can now use its unique index (V29)
+  upper(c.code) = upper(:code) wrapped the indexed column in a function, so the code half of
+  UNIQUE (restaurant_id, code) was unusable. Codes are now normalised on write (V29 upper-cases
+  existing rows) and the query is a plain equality. One CouponCode.normalise() is the single place
+  that normalisation happens, so the write path and all read paths cannot drift - the old query
+  tolerated any input precisely because it could not use the index.
+  Locale.ROOT, not the default locale: in a Turkish locale "diwali".toUpperCase() produces a dotted
+  capital I and the same code would normalise differently depending on where the server runs.
+
+DB-03 - the audit search no longer defeats its own indexes
+  Replaced the ":param is null or ..." JPQL with AuditSpecifications, which adds only the predicates
+  actually supplied, so idx_audit_action and idx_audit_time can be used. The email filter is now a
+  PREFIX match ('alice%') rather than a substring ('%alice%'): a leading wildcard cannot use an index
+  at all, and searching by the start of an address covers the realistic case. audit_log is one of
+  only two unbounded-growth tables here, so this was the finding most likely to worsen unattended.
+
+DB-10 - websocket publish moved to after commit
+  Was inside the notification transaction. Two problems, the first being correctness rather than
+  performance: a notification was sent for work that might still roll back, so an order whose stock
+  check then failed had already told the kitchen it was coming. Second, it was network I/O holding a
+  database connection - in placeOrder's case while the table, coupon, counter and inventory locks were
+  all still held. Now registered as an afterCommit synchronisation, falling back to publishing
+  immediately when no transaction is active.
+
+DELIBERATELY NOT FIXED: DB-06 (per-restaurant checkout serialisation on the order counter)
+  Every concurrent checkout in a restaurant queues on one counter row. The fix options all trade
+  something real - readable sequential numbers, or gap-free numbering - and the cost depends entirely
+  on actual throughput. Changing lock scope on the hottest write path without measurement would be
+  guesswork. Watch hikaricp_connections_pending and checkout latency during the k6 baseline: if
+  latency rises with concurrent VUs while CPU stays flat, this is why.
+
+Verification
+  - EXECUTED: CouponCode.normalise compiled and run under a TURKISH locale - 7/7, including the
+    dotted-I case that a naive toUpperCase() gets wrong. Java syntax clean; migration ordering clean
+    (29); every table referenced by V27-V29 is created in an earlier migration; no index-defeating
+    predicate (upper() on an indexed column, leading-wildcard LIKE, OR-null filter) remains in
+    executable code; paging guard clean; all kitchen list reads batch; OrderStatusPolicy 31/31;
+    authorization/platform/entity-migration verifiers clean; 61 pure Java logic tests pass; all
+    frontend sources parse.
+  - Two checker false positives were found and fixed rather than accepted: the table-reference check
+    matched "ON FAILS" inside the word "MIGRATION" for want of a word boundary, and the
+    predicate check matched comments describing the OLD approach. Both now strip comments and anchor
+    properly.
+  - [NOT VERIFIED] Still no database: no EXPLAIN, no plan, no row count, no timing. V27, V28 and V29
+    have never been applied. V28 and V29 are the two that CAN fail on real data (duplicate active
+    carts; codes differing only by case) - each carries the detection query in its header. Run those
+    before applying.
+
+
+--------------------------------------------------------------------------------
+PHASE 21 - LAST DEFECT: THE STATUS LISTING, AND A GAP IN MY OWN VERIFICATION
+--------------------------------------------------------------------------------
+
+GET /api/v1/orders/status/{status} was the last place the unbounded-plus-N+1 pattern survived. I
+skipped it twice with the same reasoning - "no frontend consumer, so leaving it does not widen the
+change" - which was weaker than it looked: it is a live authenticated endpoint any staff member can
+call, and it was the only place left with a defect I had twice declared fixed.
+
+  - Paged (newest first, size capped at 100), served by idx_orders_restaurant_status_created.
+  - Items and payment state now come from a shared pageOfOrders() helper used by BOTH listings, so
+    the batching cannot be right in one and forgotten in the other - which is precisely what happened.
+  - BREAKING: returns a page. No consumer in this repository.
+  - Also removed three more dead queries, two of which were NOT tenant-scoped
+    (findByStatusOrderByCreatedAtAsc, findByStatusInOrderByCreatedAtAsc) and would have returned
+    orders across every restaurant had anyone ever called them. Every remaining Order query is now
+    either restaurant-scoped or keyed by a unique id - asserted by a check.
+
+A MISTAKE I MADE, AND THE CHECK IT PRODUCED
+  Removing those dead queries also removed findByRestaurantAndStatusOrderByCreatedAtAsc, which
+  KitchenServiceImpl.getPendingOrders calls. That would have failed at context startup.
+
+  It went unnoticed because a missing repository method is a "cannot find symbol" error, and the Java
+  syntax pass used throughout this project FILTERS THAT CLASS OF ERROR OUT - without dependencies on
+  the classpath, every file produces hundreds of them. The one check that would have caught it was the
+  one being suppressed. Spring Data compounds it: the interface still compiles and the failure appears
+  at startup, not at the call site.
+
+  Fixed, and docs/repo_calls_check.py now resolves every repository call against its declaration.
+  Mutation-tested: deleting a still-called method is caught.
+
+Tests added to OrdersPaginationIT: the status listing is paged, batched and size-capped; an invalid
+status is still rejected. 76 integration cases now exist across 10 files.
+
+Verification
+  - EXECUTED: repository call resolution (new, mutation-tested); paging guard; authorization /
+    platform / entity-migration; migration ordering (29); CouponCode under a Turkish locale 7/7;
+    OrderStatusPolicy 31/31; 61 pure Java logic tests; all frontend sources parse; both order
+    listings proven to share one batching path.
+  - [NOT VERIFIED] All 76 integration cases remain unexecuted. No database, no EXPLAIN, no migration
+    applied.
+
+
+--------------------------------------------------------------------------------
+PHASE 22 - BUILD FIX: MISSING IMPORT (reported from a real ./gradlew test run)
+--------------------------------------------------------------------------------
+
+compileJava failed with two "cannot find symbol: class Query" errors in
+RestaurantTableRepository. My fault: the file's pre-existing query used the fully-qualified
+@org.springframework.data.jpa.repository.Query, so the file had no import, and the two lock finders
+I added for the cart-concurrency fix used the bare @Query form.
+
+  Fixed by adding the Query and Param imports and normalising the fully-qualified usages to match.
+
+WHY MY CHECKS MISSED IT, AGAIN
+  This is the second failure of the same class. A missing import and a deleted-but-still-called
+  repository method both produce "cannot find symbol" - and the Java syntax pass used throughout this
+  work FILTERS THAT EXACTLY, because without dependencies on the classpath every file emits hundreds
+  of them. Everything resting on symbol resolution was therefore invisible to it.
+
+  Two structural checks now cover it, both mutation-tested:
+    docs/imports_check.py    - every annotation/type used unqualified is imported. Reproducing the
+                               real failure (removing the Query import) is caught.
+    docs/repo_calls_check.py - every repository call resolves to a declared method (phase 21).
+
+Also cleared the MapStruct warnings this work introduced: OrderMapper and OrderTrackingMapper now
+declare paymentStatus/amountPaid/balanceDue as ignored, which is accurate - the services set them
+from a batched payment lookup, and deriving them in the mapper would reintroduce a query per row.
+
+Frontend, VERIFIED BY THE USER on a real toolchain: npm ci clean (0 vulnerabilities),
+tsc --noEmit clean, 40/40 vitest tests pass, vite build succeeds (223 modules, 115 kB gzipped main
+bundle). That is the first actual compilation and test run of the frontend in this project, and it
+confirms the breaking type changes (paged orders, required publicToken, rewritten PaymentCell) are
+consistent, and that the earlier "vite/client" typecheck failure here was a broken partial install
+rather than a defect.
+
+Backend: still not compiled successfully end to end. The import fix is the only change since the
+reported failure; the next ./gradlew test will reveal whatever is behind it.
+
+
+--------------------------------------------------------------------------------
+PHASE 23 - BUILD FIX: SECOND MISSING IMPORT, AND A PROPERLY GENERAL CHECKER
+--------------------------------------------------------------------------------
+
+compileJava failed on "cannot find symbol: class ResourceNotFoundException" in
+NotificationServiceImpl - the assertOwn() guard added for the cross-tenant notification fix (SEC-002)
+throws it without importing it. Import added.
+
+THE CHECKER WAS THE REAL PROBLEM
+  Phase 22 added docs/imports_check.py and I called it mutation-tested. It was - against the failure
+  I had just seen. It worked from a hand-written list of Spring annotations, so a missing import of a
+  PROJECT class was something it could not express, let alone catch. Enumerating what to look for was
+  the mistake.
+
+  Rewritten to enumerate what EXISTS: it builds a map of all 254 project classes from the source tree
+  and checks every unqualified use against the file's imports, its own package and any wildcard. A
+  second pass still covers framework annotations, because enumerating project classes cannot see
+  those - the first version did only the framework pass and missed the project class, and the rewrite
+  briefly did only the project pass and missed @Query. Both passes are needed; neither alone suffices.
+
+  One false positive was found and fixed before trusting it: CollectPaymentsRequest declares a nested
+  `record Component`, which the framework pass read as Spring's @Component. Nested declarations now
+  shadow framework names.
+
+  Re-tested against all three real build failures - the missing @Query import, the missing
+  ResourceNotFoundException import, and a removed project-class import - each caught exactly once,
+  against a clean baseline.
+
+Why this class of error kept getting through: `cannot find symbol` is filtered out by the Java syntax
+pass available here, because without dependencies on the classpath every file emits hundreds of them.
+Three failures shipped behind that filter. The three structural checks that now cover it
+(imports_check, repo_calls_check, paging_check) are the substitute, and all are mutation-tested.
+
+
+--------------------------------------------------------------------------------
+PHASE 24 - TEST FIX: MY OWN START-UP GUARD BLOCKED EVERY INTEGRATION TEST
+--------------------------------------------------------------------------------
+
+Compilation finally succeeded. All 81 failures had ONE cause: IllegalStateException at
+JwtProperties.java:34 - the placeholder-secret guard I added for SEC-005 rejected this project's own
+test fixture. application-test.yml carried
+  jwt.secret: test-only-secret-key-not-used-anywhere-else-32b
+and my banned list included "secret-key", so every @SpringBootTest died at context startup. The 68
+tests that passed were the ones needing no Spring context.
+
+Two fixes, because both halves were wrong
+  1. The banned list was OVER-BROAD. "secret-key" and "example" are substrings of plenty of
+     legitimate values. Narrowed to the placeholders this repository has actually carried:
+     dev-only, change-me, replace-with, insecure, placeholder. A guard that rejects valid secrets
+     does more damage than one slightly less thorough - it blocks the build, and the real protection
+     is that prod has no default at all.
+  2. The test fixture is now a plainly non-placeholder fixed value, so the guard itself stays
+     exercised by the test suite rather than worked around.
+
+docs/config_guard_check.py now runs the guard against every application*.yml, parsing the banned list
+and minimum length out of JwtProperties so the two cannot drift. Mutation-tested: restoring the exact
+secret that broke the build is caught, as is a too-short one.
+
+The general lesson, narrower than "test your validators": a validator that runs at START-UP is part of
+the build, so its rules must be checked against every value the build will feed it. I added this guard
+and verified the production path (no default -> fails fast) without ever checking the test path.
+
+Verification: config guard, imports, repository calls, paging, authorization/platform/entity-migration,
+migration ordering, OrderStatusPolicy 31/31, CouponCode 7/7 - all clean. Frontend remains green on the
+user's real toolchain (tsc, 40/40 vitest, vite build).
+
+
+--------------------------------------------------------------------------------
+PHASE 25 - FIRST REAL TEST RUN: 105 of 149 PASS, 44 FAIL (context now starts)
+--------------------------------------------------------------------------------
+
+The previous fix worked: Spring contexts load and integration tests execute for the first time. 44
+failures remain, and they were NOT 44 problems. Triage, with what is proven versus not:
+
+PROVEN CAUSES, FIXED
+  1. PLATFORM_OWNER was never seeded in the test schema (5 failures). Migration V24 seeds it in
+     production; Flyway is off for tests, so src/test/resources/data.sql has to mirror it - and its own
+     header says exactly that. My own test message predicted this: "migration V24 should have seeded
+     PLATFORM_OWNER". Added to data.sql.
+  2. Test helpers enabled UPI without a UPI id (AuthorizationBoundaryIT, CartConcurrencyIT,
+     OrderCancellationIT, PaymentAnalyticsIT). RestaurantPaymentSettingServiceImpl.validateUpi has
+     always required one, so setup got a 400 and the setup assertion failed. A pre-existing business
+     rule my helpers violated - not a product defect.
+  3. SecurityAccessIT (a PRE-EXISTING test) now fails, and it should. It registers a plain CUSTOMER
+     and asserts GET /api/menu-items is NOT 401/403 - i.e. it asserted the vulnerability SEC-001
+     closed. The test's real intent is "a valid token authenticates". Rewritten to assert that
+     precisely: the token is accepted (403, not 401, on a staff endpoint) and the same token works on
+     /api/v1/me. The test name changed to say what it checks.
+
+DIAGNOSTIC, NOT A FIX
+  4. The remaining cluster is order PLACEMENT (OrdersPaginationIT, CouponFlowIT x2, PublicOrderingFlowIT,
+     OrderCancellationIT, CartConcurrencyIT): `.get("orderNumber")` is null, so the response is an error
+     body. I could not determine WHY from here and have deliberately not guessed a fourth time.
+     Every IT's json() helper now throws with the real HTTP status, method, URL and body on any >=400
+     response, so the next run reports the actual server message instead of a NullPointerException
+     several lines downstream.
+
+A MISTAKE CAUGHT BEFORE SHIPPING
+  Reading AuthorizationBoundaryIT I removed a payment-settings POST as "redundant". My scan of the
+  other test classes said its setup helper creates no settings, so the POST was NOT redundant and my
+  edit would have broken a passing test. Restored, with the comment corrected. Worth recording because
+  the check that caught it was the one I ran to verify the supposedly safe change.
+
+Verification: config guard, imports, repository calls, authorization matrix all clean; every role in
+the RoleName enum is now seeded for tests; no UPI-enabled test payload lacks an id.
+
+NOT VERIFIED: none of the 44 failures has been re-run. The placement failure's root cause is unknown.
+
+
+--------------------------------------------------------------------------------
+PHASE 26 - SECOND TEST RUN: 115 of 149 PASS (up from 105)
+--------------------------------------------------------------------------------
+
+Progress, and an important correction to my own previous summary.
+
+The strict json() helper from the last round is working: three classes now fail AT THE SETUP LINE
+(OrderCancellationIT:64, OrdersPaginationIT:57, PaymentAnalyticsIT:61) rather than with a downstream
+NullPointerException. But Gradle's default test logging prints only "AssertionError at Foo.java:64"
+and hides the message, so the status and body the helper carries were still invisible on the console.
+build.gradle now sets testLogging { exceptionFormat 'full'; showCauses true } so every failure prints
+its real message. THIS IS THE MOST USEFUL CHANGE IN THIS ROUND: the next run will name the cause.
+
+CORRECTION: last round I labelled three causes "proven". Two were: the missing PLATFORM_OWNER seed and
+the UPI-id rule. The third - the stale SecurityAccessIT - was an inference. And the cluster I left as
+"unknown" turned out to be most of what remains. I should have been more careful with "proven".
+
+WHAT THE EVIDENCE NOW SAYS
+  CartConcurrencyIT now fails at its ASSERTIONS (lines 188/209/233), not at setup, so placement
+  reaches the assertions there. Each asserts a count that should be 1 (orders created, stock moved,
+  coupon claimed). If the lock were broken I would expect 2; if placement fails entirely, 0. A single
+  cause that fits every failing class is: placement is failing for every caller, and the concurrency
+  tests merely report created == 0.
+
+  Of everything placement touches, one thing is new, load-bearing, and untested by any earlier passing
+  test: RestaurantOrderCounter - the ONLY entity in the codebase with an assigned id (every other uses
+  @GeneratedValue), and with no @Version. In the test profile Flyway is off, so V20's backfill never
+  ran and NO counter row exists; every placement therefore takes the orElseGet(create) branch and
+  calls save() on an assigned-id entity. Spring Data cannot tell such an entity is new, so it chose
+  merge() - a SELECT then INSERT - for a row the code knows it is creating.
+
+FIX (a hypothesis, stated as one)
+  RestaurantOrderCounter now implements Persistable<Long>, tracking a transient `persisted` flag set
+  by @PostPersist/@PostLoad, so isNew() is answered rather than guessed. The flag is named for what it
+  records and excluded from Lombok's @Getter/@Setter, so no clashing accessor is generated and only
+  lifecycle callbacks change it.
+
+WHAT I DO NOT KNOW
+  I have not observed the exception. This is the best-supported explanation I found by reading the
+  placement path end to end, and I checked and ruled out OrderItem.stockConsumed (@Builder.Default
+  satisfies nullable=false), Order.publicToken (only placeOrder builds orders), and the table-lock
+  queries (the cart path uses the same lock and returns 200). If placement still fails, the console
+  will now say why and that message supersedes this entire entry.
+
+--------------------------------------------------------------------------------
+QR LANDING PAGE (V41)
+--------------------------------------------------------------------------------
+See docs/QR_LANDING_PAGE.md. Built where Gradle and npm could not run, so the
+Spring layer, the screens and the integration tests are [NOT VERIFIED]; the rule
+classes, helpers, migration constraints and the repo's static checks were run.
+
+Backend
+   - V41 (additive): restaurant_landing_settings, anonymous_feedback,
+     reward_members, reward_ledger.
+   - New service/landing package (LandingLinks, WifiRules, OpeningHours,
+     RewardRules, AnonymousFeedbackRules, LandingActions, LandingService,
+     RewardService), three controllers, entities, repositories, DTOs.
+   - Google review link is a configured, validated https URL; no Place ID.
+     PublicOrderingService prefers it, falling back to the old Place-ID link.
+   - AuthRateLimitFilter: tighter per-IP-per-table buckets for anonymous
+     feedback and rewards writes (RateLimitProperties, application.yaml).
+   - SecurityConfig: /api/v1/landing/** (management), /api/v1/rewards/** (staff).
+   - CorsConfig: allows the X-Reward-Token header.
+Frontend
+   - /menu/:qr opens the landing page first when switched on (EntryPage);
+     /menu/:qr/home always does. Admin: /admin/landing.
+   - New lib/landing.ts (+ tests), LandingPage, LandingSheets, landing.css,
+     LandingSettingsPage; HelpBanner opens the request sheet on ?help=1;
+     http.get accepts headers.
+Tests
+   - 63 pure unit tests, 8 frontend tests, 25 V41 schema assertions,
+     LandingIT, and new AuthRateLimitFilterTest cases.
+   - Member lookup for staff before redeeming (GET /api/v1/rewards/members/{code});
+     cross-links between Customer feedback and the landing-page feedback inbox.
+   - Bug-hunt fixes: path-traversal hole in the Google link check (/maps/../url),
+     btnI lucky-search redirect, RewardMember bulk-update column flags, spend-per-
+     point rounding to 0.00, 24:00 opening hours, first-save race, rewards-join
+     refetch race in the screen, logo/cover photo paths.

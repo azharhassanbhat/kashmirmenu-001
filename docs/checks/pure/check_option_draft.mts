@@ -1,0 +1,17 @@
+import { blankOption, move, TEMPLATES, toDraft, toInput } from '../../../frontend/src/lib/optionDraft.ts';
+import assert from 'node:assert/strict';
+const draft=(o:any={})=>({key:'g',name:'Portion',kind:'SINGLE',required:true,maxSelect:'',options:[{...blankOption('Half'),priceDelta:'-80'},blankOption('Full')],...o});
+let r:any=toInput([draft({name:'  Portion '})]); assert.ok(r.ok); assert.equal(r.groups[0].name,'Portion'); assert.equal(r.groups[0].options[0].priceDelta,-80); assert.equal(r.groups[0].options[1].priceDelta,0); assert.equal(r.groups[0].maxSelect,null);
+const stored:any=[{id:7,name:'Extras',kind:'MULTI',required:false,maxSelect:2,options:[{id:70,name:'Raita',priceDelta:30,available:true,defaultOption:false}]}];
+r=toInput(toDraft(stored)); assert.equal(r.groups[0].id,7); assert.equal(r.groups[0].options[0].id,70); assert.equal(r.groups[0].maxSelect,2);
+r=toInput([draft({options:[{...blankOption('Plain'),priceDelta:'  '}]})]); assert.equal(r.groups[0].options[0].priceDelta,0);
+r=toInput([draft({options:[{...blankOption('X'),priceDelta:'12.345'}]})]); assert.equal(r.groups[0].options[0].priceDelta,12.35);
+assert.deepEqual(toInput([draft({name:' '})]),{ok:false,error:'Every group needs a name.'});
+assert.equal(toInput([draft({options:[]})]).ok,false); assert.equal(toInput([draft({options:[blankOption('')]})]).ok,false);
+assert.equal(toInput([draft({options:[{...blankOption('X'),priceDelta:'abc'}]})]).ok,false); assert.equal(toInput([draft({options:[{...blankOption('X'),priceDelta:'99999'}]})]).ok,false);
+r=toInput([draft({kind:'SINGLE',maxSelect:'5'})]); assert.equal(r.groups[0].maxSelect,null);
+assert.equal(toInput([draft({kind:'MULTI',maxSelect:'0'})]).ok,false); assert.equal(toInput([draft({kind:'MULTI',maxSelect:'2.5'})]).ok,false); assert.equal(toInput([draft({kind:'MULTI',maxSelect:'21'})]).ok,false);
+r=toInput([draft({kind:'MULTI',maxSelect:'3'})]); assert.equal(r.groups[0].maxSelect,3);
+assert.equal(TEMPLATES.portion().required,true); assert.equal(TEMPLATES.addons().kind,'MULTI'); assert.deepEqual(TEMPLATES.spice().options.map((o:any)=>o.name),['Mild','Medium','Hot']);
+const l=['a','b','c']; assert.deepEqual(move(l,0,2),['b','c','a']); assert.deepEqual(l,['a','b','c']); assert.equal(move(l,0,-1),l); assert.equal(move(l,2,3),l);
+console.log('OPTION DRAFT HELPERS PASSED');

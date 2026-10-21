@@ -1,0 +1,51 @@
+# The integration tests against a real MySQL: ./gradlew mysqlTest, with the throwaway database from
+# docker-compose.test.yml. Everything the H2 "test" profile sets is repeated here, because a profile
+# replaces rather than extends another.
+#
+# What is different, and why it matters:
+#   - Flyway RUNS, so every migration (V1 to the latest) is applied to a real MySQL.
+#   - Hibernate only VALIDATES: if an entity and the migrated schema disagree, the context fails to start.
+#   - Isolation is MySQL's own default (REPEATABLE READ), not H2's, so the locking and isolation
+#     behaviour the code depends on is actually exercised.
+spring:
+  datasource:
+    url: ${TEST_DB_URL:jdbc:mysql://localhost:3308/kashmir_menu_test}
+    username: ${TEST_DB_USERNAME:kashmirmenu_test}
+    password: ${TEST_DB_PASSWORD:kashmirmenu_test_pw}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 30
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+
+  sql:
+    init:
+      # Roles come from the migrations here; data.sql is only for the H2 schema Hibernate generates.
+      mode: never
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+server:
+  port: 8081
+
+jwt:
+  secret: 7qQmKpR2vXcLt9ZaYbNdWfGhJkMnPsTuVwXyZ3A5B7C9
+  access-token-expiration: 3600000
+
+app:
+  restaurant-approval:
+    # Existing ITs register an owner and trade at once; RestaurantApprovalIT switches approval on.
+    required: false
+  cors:
+    allowed-origins: http://localhost:3000
+  rate-limit:
+    auth-limit: 1000
+    auth-window-seconds: 60
+    public-limit: 5000
+    public-guest-limit: 5000
+    public-track-limit: 5000

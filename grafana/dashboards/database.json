@@ -1,0 +1,436 @@
+{
+  "uid": "km-database",
+  "title": "KashmirMenu \u2014 Database Performance",
+  "description": "HikariCP connection pool health. Exported automatically by Spring Boot once a metrics registry is present; no custom instrumentation.",
+  "tags": [
+    "kashmirmenu",
+    "database"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Connections",
+      "description": "Active approaching max, with idle at zero, is a pool about to queue.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kashmirmenu-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kashmirmenu-prometheus"
+          },
+          "expr": "hikaricp_connections_active{job=\"kashmirmenu\"}",
+          "legendFormat": "active",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kashmirmenu-prometheus"
+          },
+          "expr": "hikaricp_connections_idle{job=\"kashmirmenu\"}",
+          "legendFormat": "idle",
+          "refId": "B",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kashmirmenu-prometheus"
+          },
+          "expr": "hikaricp_connections{job=\"kashmirmenu\"}",
+          "legendFormat": "total",
+          "refId": "C",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kashmirmenu-prometheus"
+          },
+          "expr": "hikaricp_connections_max{job=\"kashmirmenu\"}",
+          "legendFormat": "max",
+          "refId": "D",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Pool utilisation",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kashmirmenu-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kashmirmenu-prometheus"
+          },
+          "expr": "hikaricp_connections_active{job=\"kashmirmenu\"} / clamp_min(hikaricp_connections_max{job=\"kashmirmenu\"}, 1)",
+          "legendFormat": "utilisation",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Threads awaiting a connection",
+      "description": "Anything above zero means request threads are blocked waiting for the pool. There is no healthy steady-state value here other than zero.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kashmirmenu-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kashmirmenu-prometheus"
+          },
+          "expr": "hikaricp_connections_pending{job=\"kashmirmenu\"}",
+          "legendFormat": "pending",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Connection acquisition time",
+      "description": "How long borrowing a connection takes. Rises before pending does, so it is the earlier warning of the two.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kashmirmenu-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kashmirmenu-prometheus"
+          },
+          "expr": "rate(hikaricp_connections_acquire_seconds_sum{job=\"kashmirmenu\"}[$__rate_interval]) / clamp_min(rate(hikaricp_connections_acquire_seconds_count{job=\"kashmirmenu\"}[$__rate_interval]), 0.001)",
+          "legendFormat": "mean acquire",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Connection usage time",
+      "description": "How long a connection is held. A rise here with flat traffic points at a slow query or a transaction held open too long.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kashmirmenu-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kashmirmenu-prometheus"
+          },
+          "expr": "rate(hikaricp_connections_usage_seconds_sum{job=\"kashmirmenu\"}[$__rate_interval]) / clamp_min(rate(hikaricp_connections_usage_seconds_count{job=\"kashmirmenu\"}[$__rate_interval]), 0.001)",
+          "legendFormat": "mean usage",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Connection timeouts",
+      "description": "Requests that gave up waiting. These surface to the user as errors.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kashmirmenu-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kashmirmenu-prometheus"
+          },
+          "expr": "rate(hikaricp_connections_timeout_total{job=\"kashmirmenu\"}[$__rate_interval])",
+          "legendFormat": "timeouts/s",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "text",
+      "title": "On query-level metrics",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Per-query timings are **not** on this dashboard, because nothing in the application exports them today. Micrometer does not instrument individual JPA queries, and adding that means either Hibernate statistics (noticeable overhead, high cardinality) or tracing (see the deferred Loki/Tempo step in `OBSERVABILITY_PLAN.md`).\n\nFor now, use *connection usage time* above as the proxy: a query that got slower shows up as a connection held longer. For MySQL internals, the slow query log remains the right tool."
+      }
+    }
+  ],
+  "templating": {
+    "list": []
+  }
+}

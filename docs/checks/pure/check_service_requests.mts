@@ -1,0 +1,12 @@
+import { guestStatusText, isOpenRequest, nextStep, REQUEST_CHOICES, waitText } from '../../../frontend/src/lib/serviceRequests.ts';
+import assert from 'node:assert/strict';
+assert.deepEqual(nextStep('PENDING'), { to: 'ACKNOWLEDGED', label: 'Acknowledge' });
+assert.equal(nextStep('ACKNOWLEDGED')?.to, 'IN_PROGRESS');
+assert.equal(nextStep('IN_PROGRESS')?.to, 'COMPLETED');
+assert.equal(nextStep('COMPLETED'), null); assert.equal(nextStep('CANCELLED'), null);
+assert.equal(isOpenRequest('PENDING'), true); assert.equal(isOpenRequest('COMPLETED'), false);
+assert.match(guestStatusText('PENDING'), /waiting/i);
+assert.equal(waitText(20), 'under 1 min'); assert.equal(waitText(310), '5 min'); assert.equal(waitText(3900), '1h 05m'); assert.equal(waitText(-5), 'under 1 min');
+const t = REQUEST_CHOICES.map(c => c.type);
+assert.ok(!t.includes('OTHER')); assert.equal(new Set(t).size, t.length);
+console.log('FRONTEND HELPER CHECKS PASSED');

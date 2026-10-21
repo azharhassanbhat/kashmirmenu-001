@@ -1,0 +1,144 @@
+spring:
+  application:
+    name: kashmirmenu
+
+  profiles:
+    # Defaults to prod on purpose. A deployment that forgets this variable then fails fast on the
+    # missing JWT_SECRET, instead of silently starting on the dev profile's published placeholder.
+    # For local work set SPRING_PROFILES_ACTIVE=dev explicitly.
+    active: ${SPRING_PROFILES_ACTIVE:prod}
+
+  web:
+    # English only. "fixed" ignores the browser's Accept-Language header, so every message (including the
+    # default wording of validation errors, which Hibernate Validator would otherwise translate to the
+    # caller's language) is English.
+    locale: en
+    locale-resolver: fixed
+
+  jackson:
+    deserialization:
+      # 1.5 for a whole-number field (a quantity, a capacity) is refused instead of silently becoming 1.
+      accept-float-as-int: false
+
+  servlet:
+    multipart:
+      # A phone photo is several MB; ImageProcessor re-encodes it to a few hundred KB before it is stored.
+      # The proxy in front (nginx client_max_body_size) must allow at least this plus the form envelope.
+      max-file-size: 10MB
+      max-request-size: 11MB
+
+server:
+  shutdown: graceful
+
+spring.lifecycle.timeout-per-shutdown-phase: 30s
+
+management:
+  # Actuator listens on its own port, which is never published to the host and never proxied by
+  # nginx (which forwards only /api and /ws). So metrics are unreachable from the internet by
+  # topology rather than only by an authorization rule, and Prometheus does not need a credential
+  # that would stop working exactly when the auth stack is unhealthy.
+  server:
+    port: ${MANAGEMENT_PORT:9091}
+
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+
+  endpoint:
+    health:
+      show-details: when-authorized
+      probes:
+        enabled: true
+
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
+  metrics:
+    tags:
+      # Attached to every metric so a later multi-environment Prometheus can tell them apart.
+      application: kashmirmenu
+      environment: ${ENVIRONMENT:local}
+    web:
+      server:
+        # Spring already templates the uri tag (/api/v1/orders/{orderId}), so ids and tokens never
+        # become labels. This caps the damage from a scanner hitting thousands of unmatched paths.
+        max-uri-tags: 150
+
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+  observations:
+    key-values:
+      application: kashmirmenu
+
+  # Histogram buckets, not client-side percentiles. Percentiles computed inside one instance cannot
+  # be averaged across instances or over time; buckets let Grafana work out a correct
+  # histogram_quantile across both. The explicit SLO boundaries keep the series count bounded.
+  distribution:
+    percentiles-histogram:
+      http.server.requests: true
+    slo:
+      http.server.requests: 50ms, 100ms, 200ms, 500ms, 1s, 2s
+    maximum-expected-value:
+      http.server.requests: 5s
+
+# Logging is configured in logback-spring.xml: the human-readable pattern on dev, one JSON
+# object per line on prod. A logging.pattern.console here would be ignored by that file, so it was
+# removed rather than left to look authoritative.
+
+app:
+  platform-owner:
+    # Set once, to provision the platform administrator. On first start with no platform owner
+    # present, a DISABLED account is created for this address and a single-use claim token is
+    # printed to the log; POST /api/platform-admin/claim sets the password. No credential is
+    # stored here. Leave empty and platform administration is simply not provisioned.
+    email: ${PLATFORM_OWNER_EMAIL:}
+    name: ${PLATFORM_OWNER_NAME:Platform Owner}
+  restaurant-approval:
+    # New registrations start PENDING and cannot operate until the platform owner approves them.
+    # Set false to let them start APPROVED, as registration behaved before approval existed.
+    required: ${RESTAURANT_APPROVAL_REQUIRED:true}
+  # Currency for stored payments and every figure on the Payments & Revenue page.
+  # Keep it equal to the frontend's VITE_CURRENCY.
+  currency: ${APP_CURRENCY:INR}
+  # Origin of the customer-facing frontend; encoded into table QR codes.
+  public-base-url: ${PUBLIC_BASE_URL:http://localhost:5173}
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:}
+  rate-limit:
+    auth-limit: ${AUTH_RATE_LIMIT:20}
+    auth-window-seconds: ${AUTH_RATE_LIMIT_WINDOW_SECONDS:60}
+    # Per IP, and generous on purpose: a whole restaurant shares one wifi address.
+    public-limit: ${PUBLIC_RATE_LIMIT:600}
+    # Order-tracking reads per IP: guests poll their order screen, so this is higher than writes.
+    public-track-limit: ${PUBLIC_TRACK_RATE_LIMIT:1200}
+    # Per guest (their own token): the everyday limit.
+    public-guest-limit: ${PUBLIC_GUEST_RATE_LIMIT:60}
+    # Landing-page writes, per IP per table QR, within the window below.
+    landing-feedback-limit: ${LANDING_FEEDBACK_RATE_LIMIT:5}
+    landing-rewards-limit: ${LANDING_REWARDS_RATE_LIMIT:20}
+    landing-window-seconds: ${LANDING_RATE_LIMIT_WINDOW_SECONDS:600}
+    trust-forwarded-header: ${TRUST_FORWARDED_HEADER:false}
+  billing:
+    # An order is billed and payable only once the kitchen confirms it. Set false if you do not use
+    # the confirm step, so guests can pay as soon as they have ordered.
+    require-confirmed-orders: ${BILLING_REQUIRE_CONFIRMED_ORDERS:true}
+  table-session:
+    # Most guests one table visit admits (joining needs no login, so it is capped).
+    max-diners: ${TABLE_SESSION_MAX_DINERS:30}
+    # No guest has acted for this long: the visit counts as idle. Idle and fully paid, it is closed
+    # automatically; idle with money still owed, it is left open and flagged for staff.
+    idle-timeout: ${TABLE_SESSION_IDLE_TIMEOUT:PT3H}
+    expiry-check-interval: ${TABLE_SESSION_EXPIRY_CHECK_INTERVAL:PT10M}
+    expiry-enabled: ${TABLE_SESSION_EXPIRY_ENABLED:true}
+  google-places:
+    # Optional. Without a key diners still get the "Review us on Google" link.
+    api-key: ${GOOGLE_PLACES_API_KEY:}
+    cache-minutes: ${GOOGLE_PLACES_CACHE_MINUTES:10}
+    language-code: ${GOOGLE_PLACES_LANGUAGE:en}

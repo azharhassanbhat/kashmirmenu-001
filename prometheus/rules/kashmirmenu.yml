@@ -1,0 +1,152 @@
+# Alert rules for KashmirMenu.
+#
+# Every rule has a sustained `for:` window. A single failed scrape or one slow request is not an
+# incident, and an alert that fires on noise gets muted, which is worse than having no alert.
+#
+# Routing is documented in MONITORING_ALERTS.md. These rules are written to work either under
+# Prometheus with Alertmanager or evaluated by Grafana's built-in alerting.
+
+
+groups:
+  - name: availability
+    rules:
+      - alert: ApplicationDown
+        expr: up{job="kashmirmenu"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The API is not responding to scrapes"
+          description: >-
+            Prometheus has not been able to reach {{ $labels.instance }} for 2 minutes.
+            Either the application is down or the management port is unreachable.
+
+      - alert: ScrapeFailing
+        expr: scrape_duration_seconds{job="kashmirmenu"} > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Metrics scrapes are slow"
+          description: >-
+            Scraping {{ $labels.instance }} is taking over 10 seconds, close to the
+            scrape timeout. Check application and JVM pressure.
+
+  - name: traffic
+    rules:
+      - alert: High5xxRate
+        expr: >-
+          sum(rate(http_server_requests_seconds_count{job="kashmirmenu",status=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(http_server_requests_seconds_count{job="kashmirmenu"}[5m])), 0.001)
+          > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than 5% of requests are failing"
+          description: >-
+            The server-error ratio has been above 5% for 5 minutes.
+
+      - alert: LatencyDegraded
+        expr: >-
+          histogram_quantile(0.95,
+            sum by (le) (rate(http_server_requests_seconds_bucket{job="kashmirmenu"}[5m]))
+          ) > 1.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P95 latency above 1.5s"
+          description: >-
+            Overall P95 latency has been above 1.5 seconds for 10 minutes.
+
+  - name: resources
+    rules:
+      - alert: JvmHeapPressure
+        expr: >-
+          sum(jvm_memory_used_bytes{job="kashmirmenu",area="heap"})
+          /
+          clamp_min(sum(jvm_memory_max_bytes{job="kashmirmenu",area="heap"}), 1)
+          > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Heap over 90% for 10 minutes"
+          description: >-
+            Check JVM heap usage and garbage collection activity.
+
+      - alert: HighCpu
+        expr: process_cpu_usage{job="kashmirmenu"} > 0.85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Process CPU above 85%"
+          description: >-
+            Correlate sustained CPU usage with requests per second.
+
+  - name: database
+    rules:
+      - alert: DbPoolExhausted
+        expr: hikaricp_connections_pending{job="kashmirmenu"} > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Requests are queuing for a database connection"
+          description: >-
+            The Hikari connection pool has had waiting threads for 5 minutes.
+
+      - alert: DbPoolSaturated
+        expr: >-
+          hikaricp_connections_active{job="kashmirmenu"}
+          /
+          clamp_min(hikaricp_connections_max{job="kashmirmenu"}, 1)
+          > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Connection pool over 90% utilised"
+          description: >-
+            The connection pool is approaching exhaustion.
+
+  - name: security
+    rules:
+      - alert: ElevatedAuthenticationFailures
+        expr: >-
+          sum(rate(app_authentication_failures_total{job="kashmirmenu"}[5m]))
+          >
+          3 * sum(rate(app_authentication_failures_total{job="kashmirmenu"}[24h])) + 0.05
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unusual rate of failed sign-in attempts"
+          description: >-
+            Failed sign-ins are running well above their 24-hour baseline.
+            Investigate the audit log before drawing conclusions.
+
+  - name: ordering
+    rules:
+      - alert: OrderingLockConflictsGivingUp
+        expr: sum(increase(app_lock_failures_total{job="kashmirmenu"}[15m])) > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Guests or staff are being told the table is busy"
+          description: >-
+            More than three lock conflicts in 15 minutes outlasted retries.
+
+      - alert: OrderingLockRetriesElevated
+        expr: sum(rate(app_lock_retries_total{job="kashmirmenu"}[10m])) > 0.2
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Requests are colliding on locks more than usual"
+          description: >-
+            Lock retries are elevated. Check slow queries and long-running transactions.

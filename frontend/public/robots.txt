@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /menu/
+Disallow: /admin
+Disallow: /kitchen

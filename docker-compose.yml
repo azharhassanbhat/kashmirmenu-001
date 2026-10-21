@@ -1,0 +1,94 @@
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:-kashmir_menu}
+      MYSQL_USER: ${DB_USERNAME:-kashmirmenu}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env}
+      # Day and hour boundaries in the payment reports are this zone's. The app container
+      # uses the same value, so stored timestamps and reporting agree.
+      TZ: ${APP_TIMEZONE:-Asia/Kolkata}
+    ports:
+      # Host-local only. Published to 0.0.0.0 this was reachable from the LAN, unlike the app, which
+      # has always bound 127.0.0.1. Anyone connecting from another machine now needs an SSH tunnel.
+      - "127.0.0.1:3307:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks:
+      - default
+      - observability
+    environment:
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-prod}
+      # Must match the mysql service's TZ (see above).
+      TZ: ${APP_TIMEZONE:-Asia/Kolkata}
+      APP_CURRENCY: ${APP_CURRENCY:-INR}
+      # Optional, and only used on the very first start: see .env.example.
+      PLATFORM_OWNER_EMAIL: ${PLATFORM_OWNER_EMAIL:-}
+      PLATFORM_OWNER_NAME: ${PLATFORM_OWNER_NAME:-Platform Owner}
+      # true: new restaurants start PENDING until the platform owner approves them. See docs/RESTAURANT_APPROVAL.md.
+      RESTAURANT_APPROVAL_REQUIRED: ${RESTAURANT_APPROVAL_REQUIRED:-true}
+      # Actuator's port. Intentionally absent from ports: below - Prometheus reaches it over the
+      # observability network, and nothing on the host can.
+      MANAGEMENT_PORT: ${MANAGEMENT_PORT:-9091}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DB_URL: jdbc:mysql://mysql:3306/${DB_NAME:-kashmir_menu}
+      DB_USERNAME: ${DB_USERNAME:-kashmirmenu}
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (32+ chars)}
+      JWT_ACCESS_TOKEN_EXPIRATION: ${JWT_ACCESS_TOKEN_EXPIRATION:-86400000}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://trykashmir.ddns.net}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://trykashmir.ddns.net}
+      # Per IP, deliberately generous: every phone in a restaurant shares one wifi address.
+      PUBLIC_RATE_LIMIT: ${PUBLIC_RATE_LIMIT:-600}
+      # Per guest (their own token): the limit a diner meets day to day.
+      PUBLIC_GUEST_RATE_LIMIT: ${PUBLIC_GUEST_RATE_LIMIT:-60}
+      # Order-tracking reads per IP; guests poll their order screen, so this is higher than writes.
+      PUBLIC_TRACK_RATE_LIMIT: ${PUBLIC_TRACK_RATE_LIMIT:-1200}
+      LANDING_FEEDBACK_RATE_LIMIT: ${LANDING_FEEDBACK_RATE_LIMIT:-5}
+      LANDING_REWARDS_RATE_LIMIT: ${LANDING_REWARDS_RATE_LIMIT:-20}
+      LANDING_RATE_LIMIT_WINDOW_SECONDS: ${LANDING_RATE_LIMIT_WINDOW_SECONDS:-600}
+      # Most guests one table visit admits. Raise it for load tests that send many users to few tables.
+      TABLE_SESSION_MAX_DINERS: ${TABLE_SESSION_MAX_DINERS:-30}
+      # How long a table can sit untouched before it counts as idle (ISO-8601, e.g. PT3H). Idle and paid up it
+      # closes by itself; idle with money owing it stays open and is flagged for staff.
+      TABLE_SESSION_IDLE_TIMEOUT: ${TABLE_SESSION_IDLE_TIMEOUT:-PT3H}
+      # true: an order is payable only once the kitchen has confirmed it. false: payable as soon as placed.
+      BILLING_REQUIRE_CONFIRMED_ORDERS: ${BILLING_REQUIRE_CONFIRMED_ORDERS:-true}
+      # The frontend nginx container is the only trusted proxy and overwrites X-Forwarded-For.
+      TRUST_FORWARDED_HEADER: ${TRUST_FORWARDED_HEADER:-true}
+      # Optional: shows the Google rating and recent reviews on the menu.
+      GOOGLE_PLACES_API_KEY: ${GOOGLE_PLACES_API_KEY:-}
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+
+networks:
+  # Shared with docker-compose.observability.yml so Prometheus can scrape app:9091. Declared here
+  # (not only in the overlay) so the main stack works unchanged on its own.
+  default:
+  observability:
+    name: kashmirmenu-observability
+
+volumes:
+  mysql-data:

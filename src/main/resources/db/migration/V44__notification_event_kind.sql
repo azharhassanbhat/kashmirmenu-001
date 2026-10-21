@@ -1,0 +1,11 @@
+-- ==========================================
+-- KashmirMenu
+-- Version : V44
+-- Description : Structured event kind on notifications (WAITER_CALL, BILL_REQUEST, NEW_ORDER ...).
+--
+--   notifications.event_kind : lets clients pick a sound from a stable code instead of reading the text.
+--       NULL on rows written before this migration; readers treat NULL as "the default for notification_type".
+--
+--   Additive only: one nullable column.
+-- ==========================================
+ALTER TABLE notifications ADD COLUMN event_kind VARCHAR(40) NULL;

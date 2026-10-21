@@ -1,0 +1,20 @@
+import { chargeRows, formatRate, includedTaxNote, previewCharges } from '../../../frontend/src/lib/charges.ts';
+import assert from 'node:assert/strict';
+const base={subtotal:800,discount:0,total:800};
+assert.deepEqual(chargeRows(base,'Items (2)').map(r=>r.key),['items']);
+let rows=chargeRows({...base,discount:80,couponCode:'TEN'},'Items (2)'); assert.deepEqual(rows.map(r=>r.label),['Items (2)','Discount (TEN)']); assert.equal(rows[1].kind,'discount');
+rows=chargeRows({...base,serviceCharge:80,serviceChargeRate:10,tax:44,taxName:'GST',taxRate:5,total:924},'Items'); assert.deepEqual(rows.map(r=>r.label),['Items','Service charge (10%)','GST (5%)']);
+assert.equal(chargeRows({...base,tax:40,taxName:' ',taxRate:5},'Items')[1].label,'Tax (5%)');
+assert.equal(chargeRows({...base,serviceCharge:0,tax:0,taxRate:5},'Items').length,1);
+assert.equal(formatRate(5),'5%'); assert.equal(formatRate(7.5),'7.5%'); assert.equal(formatRate(12.25),'12.25%');
+const f=(n:number)=>`Rs ${n}`;
+assert.equal(includedTaxNote({...base,pricesIncludeTax:true,taxIncluded:38.1,taxName:'GST'},f),'Includes GST of Rs 38.1'); assert.equal(includedTaxNote({...base,pricesIncludeTax:false,taxIncluded:38.1},f),null); assert.equal(includedTaxNote({...base,pricesIncludeTax:true,taxIncluded:0},f),null);
+let p=previewCharges(1000,0,10,5,false); assert.deepEqual([p.serviceCharge,p.tax,p.total],[100,55,1155]);
+p=previewCharges(1000,200,10,5,false); assert.deepEqual([p.net,p.serviceCharge,p.tax,p.total],[800,80,44,924]);
+p=previewCharges(1050,0,0,5,true); assert.deepEqual([p.total,p.tax,p.taxIncluded],[1050,0,50]);
+assert.equal(previewCharges(333.33,0,0,5,false).tax,16.67); assert.equal(previewCharges(100,150,10,5,false).total,0); assert.equal(previewCharges(900,100,0,0,false).total,800);
+// cross-check with the cases the integration test expects from the server
+p=previewCharges(800,80,10,5,false); assert.deepEqual([p.serviceCharge,p.tax,p.total],[72,39.6,831.6]);
+p=previewCharges(800,0,0,5,true); assert.equal(p.taxIncluded,38.1);
+p=previewCharges(800,0,10,18,false); assert.deepEqual([p.serviceCharge,p.tax,p.total],[80,158.4,1038.4]);
+console.log('CHARGES PREVIEW + ROWS PASSED');

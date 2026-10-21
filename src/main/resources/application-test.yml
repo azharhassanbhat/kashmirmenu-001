@@ -1,0 +1,45 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb;MODE=MySQL;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+
+    open-in-view: false
+
+    defer-datasource-initialization: true
+
+  sql:
+    init:
+      mode: embedded
+
+  flyway:
+    enabled: false
+
+server:
+  port: 8081
+
+jwt:
+  # A fixed, non-placeholder value for tests. Fixed so token assertions are reproducible;
+  # not a placeholder so the JwtProperties guard accepts it, which is itself under test.
+  secret: 7qQmKpR2vXcLt9ZaYbNdWfGhJkMnPsTuVwXyZ3A5B7C9
+  access-token-expiration: 3600000
+
+app:
+  restaurant-approval:
+    # The existing integration tests register an owner and use the restaurant straight away; the
+    # approval flow has its own tests (RestaurantApprovalIT), which switch this on.
+    required: false
+  cors:
+    allowed-origins: http://localhost:3000
+  rate-limit:
+    # High ceiling so the shared Spring test context (reused across test
+    # classes) doesn't trip the limiter between unrelated tests.
+    auth-limit: 1000
+    auth-window-seconds: 60
+    # Same reason: the public bucket is shared by every test that places an order or joins a table.
+    public-limit: 5000
+    public-guest-limit: 5000
+    public-track-limit: 5000

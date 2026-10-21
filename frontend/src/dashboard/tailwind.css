@@ -1,0 +1,24 @@
+/*
+ * Tailwind utilities for the admin dashboard only.
+ *
+ * No preflight (reset) and every class carries the `tw:` prefix, so nothing here can restyle the rest of the
+ * app or collide with its existing class names. Only the utilities the dashboard markup uses are generated.
+ */
+@layer theme, base, components, utilities;
+@import 'tailwindcss/theme.css' layer(theme) prefix(tw);
+@import 'tailwindcss/utilities.css' layer(utilities) prefix(tw);
+
+/*
+ * Breakpoints in pixels, not rem: rem follows the browser's font-size setting, so a larger default font would
+ * push every step past the window width (the layout would drop to fewer columns on a wide screen) while the
+ * script's own pixel checks disagreed. `3xl` is the design's wide-desktop step (six KPI cards in a row).
+ */
+@theme {
+  --breakpoint-sm: 640px;
+  --breakpoint-md: 768px;
+  --breakpoint-lg: 1024px;
+  --breakpoint-xl: 1280px;
+  --breakpoint-3xl: 1440px;
+  /* Six KPI cards in one row (the compact card layout in dashboard.css keeps them readable from here up). */
+  --breakpoint-kpi: 1100px;
+}
